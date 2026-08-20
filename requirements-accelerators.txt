@@ -1,0 +1,6 @@
+orjson>=3.10
+lxml>=5.0
+psutil>=6.0
+rapidgzip>=0.16
+# Optional when a wheel exists for the current Python:
+indexed_bzip2>=1.7

@@ -1,0 +1,44 @@
+RU Max Clean 4.9 — notice for source data
+==========================================
+
+The builder code and the linguistic/encyclopedic data are separate works.
+
+Main online sources used by MAX mode:
+
+1. Russian Wiktionary / Kaikki machine-readable extraction
+   https://kaikki.org/ruwiktionary/
+   Content originates from Wikimedia Wiktionary and is subject to the applicable
+   Wikimedia/Wiktionary content licenses (including Creative Commons terms).
+
+2. Wikidata Lexeme entity dump
+   https://dumps.wikimedia.org/wikidatawiki/entities/latest-lexemes.json.bz2
+   Wikidata structured data is released under CC0.
+
+3. Russian Wikipedia pages-articles dump
+   https://dumps.wikimedia.org/ruwiki/latest/ruwiki-latest-pages-articles.xml.bz2
+   Wikipedia text is used only as a filtered fallback definition layer and is
+   subject to CC BY-SA and applicable Wikimedia terms. Redistribution of a
+   generated dictionary containing this text must preserve required attribution
+   and share-alike conditions.
+
+4. OpenCorpora morphology
+   https://opencorpora.org/
+   Used for lookup-form links only, never as displayed definition prose.
+
+5. V. I. Dal StarDict archive
+   Download mirrors are listed in build_ru_max_clean.py. It is used as a
+   historical fallback layer.
+
+6. Optional reader layers
+   latin_wiktionary.tsv and literary_wiktionary.tsv are conservative extracts
+   from the local Russian Wiktionary/Kaikki dump and retain Russian glosses
+   only. The curated seed TSV files are maintained with this project. The
+   applicable Wiktionary/Kaikki and project licensing/attribution terms must
+   be reviewed before redistribution of the companion packs.
+
+RU Max Clean never puts source labels/credits inside the small KOReader popup
+article because the user-facing format is definition-only. Build/source metadata
+is written separately to RU-Max-Clean/BUILD_INFO.json and SOURCES.txt.
+
+Before redistributing a generated dictionary, review and comply with the current
+licenses of every source enabled in that build.

@@ -1,0 +1,38 @@
+# Generated builds and caches
+RU-Max-Clean*/
+RU-Reader-Packs*/
+sources/stage-cache/
+sources/artifact-cache/
+sources/*.sqlite3
+sources/*.db
+sources/*.json
+sources/*.gz
+sources/*.bz2
+*.dict
+*.idx
+*.ifo
+*.syn
+*.zip
+_test_output/
+_legacy_fixture/
+__pycache__/
+*.pyc
+*.log
+
+# Local corpus material and reports
+*.fb2
+*.epub
+BOOK_COVERAGE*.json
+QUALITY_REPORT.json
+QUALITY_REVIEW.tsv
+BUILD_STATS.json
+BUILD_INFO.json
+
+# Editors and OS files
+.venv/
+venv/
+.pytest_cache/
+.idea/
+.vscode/
+Thumbs.db
+Desktop.ini

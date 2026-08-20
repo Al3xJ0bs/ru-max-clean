@@ -1,0 +1,25 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        python-version: ['3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Run regression suite
+        shell: pwsh
+        run: |
+          python -X utf8 test_builder.py
+          python -X utf8 test_reader_layers.py
+          python -X utf8 test_source_manager.py
+          python -X utf8 test_stage_cache.py
+          python -m compileall -q .
