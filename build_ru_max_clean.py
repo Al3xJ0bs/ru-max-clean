@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 62203)
-Total output lines: 5204
-
 #!/usr/bin/env python3
 """Build RU Max Clean: a Russian StarDict dictionary for KOReader.
 
@@ -2082,7 +2079,1069 @@ WIKI_NOISE_CATEGORY_RE = re.compile(
 )
 WIKI_CATEGORY_LINK_RE = re.compile(r"\[\[(?:Категория|Category):([^\]|]+)", re.IGNORECASE)
 WIKI_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
-WIKI_REF_RE = re.co…12203 tokens truncated…= text:
+WIKI_REF_RE = re.compile(r"<ref\b[^>]*>.*?</ref\s*>|<ref\b[^>]*/\s*>", re.IGNORECASE | re.DOTALL)
+WIKI_TAG_RE = re.compile(r"</?(?:small|span|div|sup|sub|br|nowiki|math|chem|code|syntaxhighlight)\b[^>]*>", re.IGNORECASE)
+WIKI_EXTERNAL_LINK_RE = re.compile(r"\[(?:https?|ftp)://[^\s\]]+(?:\s+([^\]]+))?\]")
+WIKI_CITATION_RE = re.compile(r"\[(?:\d+|уточнить|источник[^\]]*)\]", re.IGNORECASE)
+WIKI_BOLD_RE = re.compile(r"'{2,5}")
+WIKI_HEADING_RE = re.compile(r"^\s*==", re.MULTILINE)
+WIKI_BAD_TITLE_RE = re.compile(
+    r"^(?:список|перечень|хронология|дискография|библиография|\d{1,4}\s+год\b|\(\d+\)\s*|\d{1,4}-(?:й|я|е)\b)",
+    re.IGNORECASE,
+)
+WIKI_BAD_TITLE_QUALIFIER_RE = re.compile(
+    r"\((?:группа|фильм|альбом|песня|игра|компания|газета|журнал|дивизия|полк|бригада|батальон|корпус|операция|сезон|деревня|село|пос[ёе]лок|город|музей|галерея)\)\s*$",
+    re.IGNORECASE,
+)
+WIKI_ENTITY_LEAD_NOISE_RE = re.compile(
+    r"^(?:[А-ЯЁA-Z][^.!?]{0,35}\s+)?(?:рок-группа|музыкальная группа|музыкальный коллектив|поп-группа|"
+    r"фильм|телесериал|роман|книга|альбом|песня|компьютерная игра|видеоигра|газета|журнал|"
+    r"воинская часть|тактическое соединение|соединение кавалерии|пехотная дивизия|авиационный полк|"
+    r"астероид|транснептуновый объект|населённый пункт|деревня|пос[ёе]лок|художественная галерея)\b",
+    re.IGNORECASE,
+)
+WIKI_PERSON_LEAD_RE = re.compile(
+    r"(?:\bродил(?:ся|ась)\b|\(\s*\d{1,2}\s+[а-яё]+\s+\d{4}\s*[-—–]|"
+    r"—\s*(?:российский|советский|американский|британский|английский|французский|"
+    r"немецкий|украинский|белорусский|польский|итальянский|испанский|китайский|"
+    r"японский)\s+(?:уч[ёе]ный|физик|химик|математик|врач|юрист|инженер|политик|"
+    r"писатель|поэт|акт[ёе]р|режисс[ёе]р|музыкант|спортсмен))",
+    re.IGNORECASE,
+)
+
+
+def _strip_nested_markup(text: str, opening: str, closing: str) -> str:
+    """Remove balanced MediaWiki template/table blocks without recursion."""
+    out: list[str] = []
+    i = 0
+    depth = 0
+    olen, clen = len(opening), len(closing)
+    while i < len(text):
+        if text.startswith(opening, i):
+            depth += 1
+            i += olen
+            continue
+        if depth and text.startswith(closing, i):
+            depth -= 1
+            i += clen
+            continue
+        if depth == 0:
+            out.append(text[i])
+        i += 1
+    return "".join(out)
+
+
+def _wiki_link_text(match: re.Match[str]) -> str:
+    target = match.group(1)
+    label = match.group(2)
+    if target.casefold().startswith(("файл:", "file:", "изображение:", "image:", "категория:", "category:")):
+        return ""
+    return label if label is not None else target
+
+
+WIKI_SIMPLE_LINK_RE = re.compile(r"\[\[([^\]|]+)(?:\|([^\]]+))?\]\]")
+
+
+def clean_wikipedia_lead(title: str, wikitext: str, *, max_chars: int = 420) -> str:
+    """Extract a compact definition-like lead from Russian Wikipedia wikitext."""
+    if not wikitext:
+        return ""
+    text = WIKI_COMMENT_RE.sub(" ", wikitext)
+    # Limit expensive markup work to the lead section, but leave enough material
+    # to get past infoboxes/templates at the very beginning.
+    heading = WIKI_HEADING_RE.search(text)
+    if heading:
+        text = text[:heading.start()]
+    text = _strip_nested_markup(text, "{{", "}}")
+    text = _strip_nested_markup(text, "{|", "|}")
+    text = WIKI_REF_RE.sub(" ", text)
+    text = WIKI_TAG_RE.sub(" ", text)
+    text = WIKI_SIMPLE_LINK_RE.sub(_wiki_link_text, text)
+    text = WIKI_EXTERNAL_LINK_RE.sub(lambda m: m.group(1) or "", text)
+    text = WIKI_CITATION_RE.sub(" ", text)
+    text = WIKI_BOLD_RE.sub("", text)
+    text = html.unescape(text)
+    text = text.replace("\r", "\n")
+
+    paragraphs = [WS_RE.sub(" ", p).strip() for p in re.split(r"\n\s*\n+", text)]
+    lead = ""
+    for p in paragraphs:
+        if len(p) < 30:
+            continue
+        if p.startswith(("|", "!", "*", "#")):
+            continue
+        lead = p
+        break
+    if not lead:
+        lead = WS_RE.sub(" ", text).strip()
+    if len(lead) < 30 or WIKI_PERSON_LEAD_RE.search(lead):
+        return ""
+
+    # Wikipedia normally starts the first sentence with the bold headword.  Remove
+    # that repetition so the KOReader card contains only the meaning.
+    base_title = re.sub(r"\s*\([^()]*\)\s*$", "", title).strip()
+    # The expression above intentionally has a conservative fallback below because
+    # article qualifiers can themselves contain punctuation.
+    if " (" in title and title.endswith(")"):
+        base_title = title.split(" (", 1)[0].strip()
+    candidates = [title, base_title]
+    stripped = lead
+    matched = False
+    for head in sorted({x for x in candidates if x}, key=len, reverse=True):
+        m = re.match(
+            rf"^\s*{re.escape(head)}(?:\s*\([^)]{{0,180}}\))?\s*(?:—|–|-|―|:\s*|—\s*это\s+|\s+—\s+)",
+            stripped,
+            flags=re.IGNORECASE,
+        )
+        if m:
+            stripped = stripped[m.end():].strip()
+            matched = True
+            break
+        m = re.match(rf"^\s*{re.escape(head)}\s+(?:это|является|представляет собой)\s+", stripped, flags=re.IGNORECASE)
+        if m:
+            stripped = stripped[m.end():].strip()
+            matched = True
+            break
+    if not matched:
+        # A non-definitional first paragraph is not safe to put in a dictionary.
+        return ""
+
+    # Wikipedia often inserts pronunciation/translation/acronym expansion before
+    # the actual definition. The popup is definition-only, so drop such a leading
+    # parenthetical when it is separated by a dash.
+    stripped = re.sub(r"^\s*\([^()]{1,180}\)\s*(?:—|–|-)\s*", "", stripped).strip()
+
+    # Keep only the first complete definitional sentence. Encyclopedic background,
+    # history, applications and examples belong in Wikipedia, not in the popup.
+    sentence_ends = list(re.finditer(r"[.!?](?=\s+[А-ЯЁA-Z]|$)", stripped))
+    if sentence_ends:
+        stripped = stripped[:sentence_ends[0].end()]
+    if len(stripped) > max_chars:
+        cut = max(stripped.rfind(". ", 250, max_chars), stripped.rfind("; ", 250, max_chars))
+        stripped = stripped[: cut + 1 if cut >= 250 else max_chars].rstrip()
+    cleaned = clean_definition(stripped)
+    if len(cleaned) < 20:
+        return ""
+    return cleaned
+
+
+def _russian_text_values(mapping: object, *, lookup_keys: bool = True) -> list[str]:
+    if not isinstance(mapping, dict):
+        return []
+    out: list[str] = []
+    # Prefer the standard Russian spelling, then Russian spelling variants such as
+    # ru-x-Q2442696 (pre-1918 orthography).
+    keys = sorted(mapping, key=lambda k: (0 if k == "ru" else 1, str(k)))
+    for key in keys:
+        if key != "ru" and not str(key).startswith("ru-"):
+            continue
+        item = mapping.get(key)
+        value = item.get("value") if isinstance(item, dict) else item
+        if lookup_keys:
+            if not is_lookup_key(value):
+                continue
+            value = normalize_key(str(value))
+        else:
+            if not isinstance(value, str) or not value.strip() or "\x00" in value:
+                continue
+            value = unicodedata.normalize("NFC", value.strip())
+        if value not in out:
+            out.append(value)
+    return out
+
+
+def process_wikidata_lexemes(
+    path: Path,
+    conn: sqlite3.Connection,
+    *,
+    fallback_only: bool,
+    include_forms: bool,
+    casefold_aliases: bool,
+    yo_aliases: bool,
+    accent_aliases: bool,
+    max_records: int = 0,
+) -> dict[str, int]:
+    """Import Russian Wikidata Lexeme glosses (CC0) and their written forms."""
+    processed = russian = glosses_added = forms_added = skipped_existing = no_ru_gloss = 0
+    if str(path).endswith(".bz2"):
+        fh_ctx = open_bz2_binary_fast(path)
+    elif str(path).endswith(".gz"):
+        fh_ctx = open_gzip_binary_fast(path)
+    else:
+        fh_ctx = open(path, "rb")
+    russian_language_marker = re.compile(rb'"language"\s*:\s*"Q7737"')
+    with fh_ctx as fh:
+        for raw in fh:
+            raw = raw.strip()
+            if not raw:
+                continue
+            # Wikimedia JSON dumps are arrays. Keep the cheap framing work in
+            # bytes so >90% non-Russian lexemes never pay UTF-8 + JSON costs.
+            if raw.startswith(b"["):
+                raw = raw[1:].lstrip()
+            if raw.endswith(b"]"):
+                raw = raw[:-1].rstrip()
+            if raw.endswith(b","):
+                raw = raw[:-1].rstrip()
+            if not raw:
+                continue
+            processed += 1
+            if max_records and processed > max_records:
+                break
+            if processed % 25_000 == 0:
+                progress_render("Wikidata Lexemes", processed, progress_expected("wikidata_entities", processed), unit="entities")
+            if processed % COMMIT_EVERY == 0:
+                conn.commit()
+            if not russian_language_marker.search(raw):
+                continue
+            try:
+                obj = json_loads_fast(raw)
+            except Exception as exc:
+                if not is_json_decode_error(exc):
+                    raise
+                continue
+            if obj.get("type") not in (None, "lexeme") or obj.get("language") != RUSSIAN_LANGUAGE_QID:
+                continue
+            lemmas = _russian_text_values(obj.get("lemmas"))
+            if not lemmas:
+                continue
+            russian += 1
+            lemma = lemmas[0]
+            exists = has_definition_for_key(conn, lemma)
+            added_here = False
+            senses = obj.get("senses")
+            if isinstance(senses, dict):
+                senses = list(senses.values())
+            if not isinstance(senses, list):
+                senses = []
+            found_gloss = False
+            for sense in senses:
+                if not isinstance(sense, dict):
+                    continue
+                glosses = _russian_text_values(sense.get("glosses"), lookup_keys=False)
+                if glosses:
+                    found_gloss = True
+                if fallback_only and exists:
+                    continue
+                for gloss in glosses:
+                    if add_sense(conn, lemma, gloss, "wikidata-lexeme"):
+                        glosses_added += 1
+                        added_here = True
+            if exists and fallback_only:
+                skipped_existing += 1
+            elif not found_gloss:
+                no_ru_gloss += 1
+
+            # Alternative Russian lemmas (including historical spelling variants)
+            # are aliases, never separate definition cards.
+            if exists or added_here:
+                add_link(conn, lemma, lemma, casefold_aliases=casefold_aliases,
+                         yo_aliases=yo_aliases, accent_aliases=accent_aliases)
+                for alias in lemmas[1:]:
+                    add_link(conn, alias, lemma, casefold_aliases=casefold_aliases,
+                             yo_aliases=yo_aliases, accent_aliases=accent_aliases)
+                if include_forms:
+                    forms = obj.get("forms")
+                    if isinstance(forms, dict):
+                        forms = list(forms.values())
+                    if isinstance(forms, list):
+                        for form_obj in forms:
+                            if not isinstance(form_obj, dict):
+                                continue
+                            for form in _russian_text_values(form_obj.get("representations")):
+                                add_link(conn, form, lemma, casefold_aliases=casefold_aliases,
+                                         yo_aliases=yo_aliases, accent_aliases=accent_aliases)
+                                forms_added += 1
+    conn.commit()
+    _PROGRESS.record("wikidata_entities", processed)
+    progress_finish("Wikidata Lexemes", processed, processed, unit="entities")
+    return {
+        "entities_processed": processed,
+        "russian_lexemes": russian,
+        "glosses_added": glosses_added,
+        "forms_linked": forms_added,
+        "skipped_existing_lemmas": skipped_existing,
+        "without_russian_gloss": no_ru_gloss,
+    }
+
+
+def _defined_lemmas_for_key(conn: sqlite3.Connection, key: str) -> list[str]:
+    if not is_lookup_key(key):
+        return []
+    norm = normalize_key(key)
+    candidates = sorted({norm, norm.casefold()})
+    placeholders = ",".join("?" for _ in candidates)
+    return [r[0] for r in conn.execute(
+        f"SELECT DISTINCT l.lemma FROM links l JOIN senses s ON s.lemma=l.lemma WHERE l.key IN ({placeholders}) ORDER BY l.lemma",
+        candidates,
+    )]
+
+
+def maybe_upgrade_existing_definition(
+    conn: sqlite3.Connection,
+    key: str,
+    candidate: str,
+    *,
+    source: str = "ruwiki-quality",
+) -> tuple[bool, str]:
+    """Replace only an obviously weak single sense with a clearly better candidate."""
+    candidate = clean_definition(candidate)
+    if not candidate:
+        return False, "empty_candidate"
+    lemmas = _defined_lemmas_for_key(conn, key)
+    if len(lemmas) != 1:
+        return False, "ambiguous_key"
+    lemma = lemmas[0]
+    rows = list(conn.execute(
+        "SELECT seq, definition, source FROM senses WHERE lemma=? ORDER BY seq", (lemma,)
+    ))
+    if len(rows) != 1:
+        return False, "multiple_senses"
+    seq, old_definition, old_source = rows[0]
+    # Do not erase a historical fallback or a user-provided/custom definition.
+    if not (str(old_source).startswith("wiktionary:") or str(old_source).startswith("wikidata")):
+        return False, "protected_source"
+    flags = set(definition_quality_flags(lemma, old_definition, old_source))
+    weak = bool(flags & {"very_short", "vague", "early_self_reference", "leading_parenthetical", "old_equivalence_placeholder", "url_residue", "broken_fragment"})
+    if not weak:
+        return False, "existing_good"
+    old_score = definition_quality_score(lemma, old_definition, old_source)
+    new_score = definition_quality_score(lemma, candidate, source)
+    if new_score < old_score + 12 or new_score < 78:
+        return False, "insufficient_gain"
+    conn.execute(
+        "UPDATE senses SET definition=?, source=? WHERE seq=?",
+        (candidate, source, seq),
+    )
+    return True, f"{old_score}->{new_score}"
+
+
+WIKI_PREPARED_SCHEMA = 1
+
+
+def _wiki_prepared_cache_path(path: Path) -> Path | None:
+    # Only cache the real rolling Wikimedia source. Tiny test/custom files should
+    # remain side-effect free.
+    if path.name != "ruwiki-latest-pages-articles.xml.bz2":
+        return None
+    return path.parent / f"ruwiki-prepared-v{WIKI_PREPARED_SCHEMA}.sqlite3"
+
+
+def _wiki_source_sig(path: Path) -> tuple[int, int]:
+    st = path.stat()
+    return int(st.st_size), int(st.st_mtime_ns)
+
+
+def _wiki_cache_valid(cache_path: Path, source_path: Path) -> bool:
+    if not cache_path.exists():
+        return False
+    try:
+        c = sqlite3.connect(cache_path)
+        rows = dict(c.execute("SELECT key, value FROM meta"))
+        c.close()
+        size, mtime = _wiki_source_sig(source_path)
+        return (
+            int(rows.get("schema", "0")) == WIKI_PREPARED_SCHEMA
+            and int(rows.get("source_size", "-1")) == size
+            and int(rows.get("source_mtime_ns", "-1")) == mtime
+        )
+    except Exception:
+        return False
+
+
+def prepare_wikipedia_cache(path: Path) -> Path | None:
+    """Extract the expensive 6-GB Wikipedia XML once into a compact candidate cache.
+
+    The cache stores broad professional/scientific candidates before the finer
+    quality/noise rules. Therefore later 4.x quality iterations can reuse it without
+    re-decompressing the entire bzip2 dump, unless the source dump itself changes.
+    """
+    cache_path = _wiki_prepared_cache_path(path)
+    if cache_path is None:
+        return None
+    if _wiki_cache_valid(cache_path, path):
+        print(f"[КЭШ WIKIPEDIA] Используется подготовленный кэш: {cache_path.name}")
+        return cache_path
+    tmp = Path(str(cache_path) + ".tmp")
+    tmp.unlink(missing_ok=True)
+    c = sqlite3.connect(tmp)
+    c.executescript("""
+        PRAGMA journal_mode=OFF;
+        PRAGMA synchronous=OFF;
+        PRAGMA temp_store=MEMORY;
+        PRAGMA page_size=32768;
+        CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
+        CREATE TABLE candidates (
+            title TEXT PRIMARY KEY,
+            categories TEXT NOT NULL,
+            lead_z BLOB NOT NULL
+        ) WITHOUT ROWID;
+    """)
+    pages = ns0 = broad = 0
+    fh_ctx = open_bz2_binary_fast(path) if str(path).endswith(".bz2") else open(path, "rb")
+    with fh_ctx as fh:
+        for _event, elem in xml_iterparse_end(fh, "page"):
+            pages += 1
+            if pages % 25_000 == 0:
+                progress_render("Wikipedia prepare", pages, progress_expected("wikipedia_pages", pages), unit="pages")
+            title = ns = redirect_target = text = None
+            for child in list(elem):
+                ctag = child.tag.rsplit("}", 1)[-1]
+                if ctag == "title":
+                    title = child.text or ""
+                elif ctag == "ns":
+                    ns = child.text
+                elif ctag == "redirect":
+                    redirect_target = child.attrib.get("title") or ""
+                elif ctag == "revision":
+                    for sub in child.iter():
+                        if sub.tag.rsplit("}", 1)[-1] == "text":
+                            text = sub.text or ""
+                            break
+            if ns != "0" or redirect_target or not is_lookup_key(title) or not text:
+                continue
+            ns0 += 1
+            categories = WIKI_CATEGORY_LINK_RE.findall(text)
+            if not categories or not any(WIKI_CATEGORY_RE.search(cat) for cat in categories):
+                continue
+            title = normalize_key(title)
+            # Only the lead is required later; storing it compressed makes the
+            # reusable cache much smaller than the original XML dump.
+            heading = WIKI_HEADING_RE.search(text)
+            lead = text[: heading.start()] if heading else text[:65536]
+            lead = lead[:65536]
+            c.execute(
+                "INSERT OR REPLACE INTO candidates(title, categories, lead_z) VALUES (?, ?, ?)",
+                (title, "\n".join(categories), sqlite3.Binary(zlib.compress(lead.encode("utf-8", "replace"), 1))),
+            )
+            broad += 1
+            if broad % 25_000 == 0:
+                c.commit()
+    c.commit()
+    size, mtime = _wiki_source_sig(path)
+    meta = {
+        "schema": str(WIKI_PREPARED_SCHEMA), "source_size": str(size),
+        "source_mtime_ns": str(mtime), "pages": str(pages), "namespace0": str(ns0),
+        "broad_candidates": str(broad),
+    }
+    c.executemany("INSERT OR REPLACE INTO meta(key,value) VALUES (?,?)", meta.items())
+    c.commit(); c.close()
+    tmp.replace(cache_path)
+    _PROGRESS.record("wikipedia_pages", pages)
+    progress_finish("Wikipedia prepare", pages, pages, unit="pages")
+    print(f"[КЭШ WIKIPEDIA] Создан {cache_path.name}; кандидатов: {broad:,}".replace(",", " "))
+    return cache_path
+
+
+def _wiki_clean_candidate(row: tuple[str, str, bytes]) -> tuple[bool, str, str, str]:
+    """CPU-heavy prepared-Wikipedia cleanup; safe to run in worker processes."""
+    title, categories_text, lead_z = row
+    if len(title) > 140 or ":" in title or WIKI_BAD_TITLE_RE.search(title) or WIKI_BAD_TITLE_QUALIFIER_RE.search(title):
+        return False, title, title, ""
+    categories = categories_text.split("\n") if categories_text else []
+    if any(WIKI_NOISE_CATEGORY_RE.search(cat) for cat in categories):
+        return False, title, title, ""
+    base_title = title.split(" (", 1)[0].strip() if " (" in title and title.endswith(")") else title
+    try:
+        text = zlib.decompress(lead_z).decode("utf-8", "replace")
+    except Exception:
+        return True, title, base_title, ""
+    definition = clean_wikipedia_lead(title, text)
+    if definition and WIKI_ENTITY_LEAD_NOISE_RE.search(definition):
+        definition = ""
+    return True, title, base_title, definition
+
+
+def _iter_batches(rows, batch_size: int = 512):
+    batch = []
+    for row in rows:
+        batch.append(row)
+        if len(batch) >= batch_size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
+
+
+def _wiki_clean_batch(batch):
+    return [_wiki_clean_candidate(row) for row in batch]
+
+
+def _parallel_cleaned_wiki_batches(rows, workers: int):
+    """Bounded ProcessPool pipeline so 484k compressed leads are never queued at once."""
+    batches = iter(_iter_batches(rows, 512))
+    if workers <= 1:
+        for batch in batches:
+            yield _wiki_clean_batch(batch)
+        return
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        pending = deque()
+        for _ in range(workers * 2):
+            try:
+                pending.append(pool.submit(_wiki_clean_batch, next(batches)))
+            except StopIteration:
+                break
+        while pending:
+            future = pending.popleft()
+            yield future.result()
+            try:
+                pending.append(pool.submit(_wiki_clean_batch, next(batches)))
+            except StopIteration:
+                pass
+
+
+def process_wikipedia_prepared(
+    prepared: Path,
+    conn: sqlite3.Connection,
+    *, fallback_only: bool, quality_upgrade_existing: bool,
+    casefold_aliases: bool, yo_aliases: bool, accent_aliases: bool,
+) -> dict[str, int]:
+    pc = sqlite3.connect(prepared)
+    meta = dict(pc.execute("SELECT key,value FROM meta"))
+    total = pc.execute("SELECT COUNT(*) FROM candidates").fetchone()[0]
+    domain = existing = leads = rejected = upgrades = 0
+    done = 0
+    cpu = max(1, os.cpu_count() or 1)
+    try:
+        requested = int(os.environ.get("RU_MAX_WIKI_WORKERS", "0") or 0)
+    except ValueError:
+        requested = 0
+    workers = requested if requested > 0 else max(1, min(8, cpu - 1))
+    if total < 50_000:
+        workers = 1
+    rows = pc.execute("SELECT title,categories,lead_z FROM candidates ORDER BY title COLLATE BINARY")
+    for batch in _parallel_cleaned_wiki_batches(rows, workers):
+        done += len(batch)
+        if done % 5_000 < len(batch):
+            progress_render("Wikipedia terms", done, total, unit="candidates")
+        for domain_ok, title, base_title, definition in batch:
+            if not domain_ok:
+                rejected += 1
+                continue
+            domain += 1
+            if not definition:
+                rejected += 1
+                continue
+            title_exists = has_definition_for_key(conn, title)
+            base_exists = base_title != title and has_definition_for_key(conn, base_title)
+            if fallback_only and (title_exists or base_exists):
+                existing += 1
+                if quality_upgrade_existing:
+                    upgrade_key = title if title_exists else base_title
+                    upgraded, _reason = maybe_upgrade_existing_definition(conn, upgrade_key, definition)
+                    if upgraded:
+                        upgrades += 1
+                continue
+            if add_sense(conn, title, definition, "ruwiki-lead"):
+                add_link(conn, title, title, casefold_aliases=casefold_aliases,
+                         yo_aliases=yo_aliases, accent_aliases=accent_aliases)
+                if base_title != title and is_lookup_key(base_title):
+                    add_link(conn, base_title, title, casefold_aliases=casefold_aliases,
+                             yo_aliases=yo_aliases, accent_aliases=accent_aliases)
+                leads += 1
+            else:
+                rejected += 1
+        if done % COMMIT_EVERY < len(batch):
+            conn.commit()
+    pc.close(); conn.commit()
+    if total:
+        progress_finish("Wikipedia terms", done, total, unit="candidates")
+    return {
+        "pages_processed": int(meta.get("pages", "0")),
+        "namespace0_pages": int(meta.get("namespace0", "0")),
+        "domain_candidates": domain,
+        "skipped_existing": existing,
+        "definitions_added": leads,
+        "redirect_aliases_seen": 0,
+        "quality_upgrades": upgrades,
+        "rejected_or_nondefinitional": rejected,
+        "prepared_cache_reused": True,
+        "prepared_candidates": total,
+        "worker_processes": workers,
+    }
+
+
+def process_wikipedia_terminology(
+    path: Path,
+    conn: sqlite3.Connection,
+    *,
+    fallback_only: bool,
+    quality_upgrade_existing: bool,
+    casefold_aliases: bool,
+    yo_aliases: bool,
+    accent_aliases: bool,
+    max_pages: int = 0,
+) -> dict[str, int]:
+    """Use Russian Wikipedia leads as fallback definitions for professional terms.
+
+    Only namespace-0 pages in professional/scientific categories are candidates.
+    Biographical/geographic/media categories are rejected. This is intentionally
+    conservative because a quick dictionary should define terms, not identify every
+    person, settlement or work of art in the encyclopedia.
+    """
+    prepared = prepare_wikipedia_cache(path)
+    if prepared is not None:
+        return process_wikipedia_prepared(
+            prepared, conn, fallback_only=fallback_only,
+            quality_upgrade_existing=quality_upgrade_existing,
+            casefold_aliases=casefold_aliases, yo_aliases=yo_aliases,
+            accent_aliases=accent_aliases,
+        )
+
+    pages = ns0 = domain = existing = leads = rejected = redirects = upgrades = 0
+    fh_ctx = open_bz2_binary_fast(path) if str(path).endswith(".bz2") else open(path, "rb")
+    with fh_ctx as fh:
+        for _event, elem in xml_iterparse_end(fh, "page"):
+            pages += 1
+            if max_pages and pages > max_pages:
+                elem.clear()
+                break
+            if pages % 25_000 == 0:
+                progress_render("Wikipedia", pages, progress_expected("wikipedia_pages", pages), unit="pages")
+            if pages % COMMIT_EVERY == 0:
+                conn.commit()
+            title = ns = redirect_target = text = None
+            for child in list(elem):
+                ctag = child.tag.rsplit("}", 1)[-1]
+                if ctag == "title":
+                    title = child.text or ""
+                elif ctag == "ns":
+                    ns = child.text
+                elif ctag == "redirect":
+                    redirect_target = child.attrib.get("title") or ""
+                elif ctag == "revision":
+                    for sub in child.iter():
+                        if sub.tag.rsplit("}", 1)[-1] == "text":
+                            text = sub.text or ""
+                            break
+            if ns != "0" or not is_lookup_key(title):
+                elem.clear()
+                continue
+            ns0 += 1
+            title = normalize_key(title)
+            if redirect_target:
+                target = normalize_key(str(redirect_target).split("#", 1)[0])
+                if is_lookup_key(target) and has_definition_for_key(conn, target):
+                    add_link(
+                        conn, title, target,
+                        casefold_aliases=casefold_aliases,
+                        yo_aliases=yo_aliases,
+                        accent_aliases=accent_aliases,
+                    )
+                    redirects += 1
+                elem.clear()
+                continue
+            if not text:
+                elem.clear()
+                continue
+            if len(title) > 140 or ":" in title or WIKI_BAD_TITLE_RE.search(title) or WIKI_BAD_TITLE_QUALIFIER_RE.search(title):
+                rejected += 1
+                elem.clear()
+                continue
+            categories = WIKI_CATEGORY_LINK_RE.findall(text)
+            if not categories or not any(WIKI_CATEGORY_RE.search(c) for c in categories):
+                elem.clear()
+                continue
+            if any(WIKI_NOISE_CATEGORY_RE.search(c) for c in categories):
+                rejected += 1
+                elem.clear()
+                continue
+            domain += 1
+            base_title = title.split(" (", 1)[0].strip() if " (" in title and title.endswith(")") else title
+            title_exists = has_definition_for_key(conn, title)
+            base_exists = base_title != title and has_definition_for_key(conn, base_title)
+            definition = ""
+            if fallback_only and (title_exists or base_exists):
+                existing += 1
+                if quality_upgrade_existing:
+                    definition = clean_wikipedia_lead(title, text)
+                    if definition and WIKI_ENTITY_LEAD_NOISE_RE.search(definition):
+                        definition = ""
+                    upgrade_key = title if title_exists else base_title
+                    upgraded, _reason = maybe_upgrade_existing_definition(conn, upgrade_key, definition)
+                    if upgraded:
+                        upgrades += 1
+                elem.clear()
+                continue
+            definition = clean_wikipedia_lead(title, text)
+            if definition and WIKI_ENTITY_LEAD_NOISE_RE.search(definition):
+                definition = ""
+            if definition and add_sense(conn, title, definition, "ruwiki-lead"):
+                add_link(conn, title, title, casefold_aliases=casefold_aliases,
+                         yo_aliases=yo_aliases, accent_aliases=accent_aliases)
+                if base_title != title and is_lookup_key(base_title):
+                    add_link(conn, base_title, title, casefold_aliases=casefold_aliases,
+                             yo_aliases=yo_aliases, accent_aliases=accent_aliases)
+                leads += 1
+            else:
+                rejected += 1
+            elem.clear()
+    conn.commit()
+    _PROGRESS.record("wikipedia_pages", pages)
+    if pages:
+        progress_finish("Wikipedia", pages, pages, unit="pages")
+    return {
+        "pages_processed": pages,
+        "namespace0_pages": ns0,
+        "domain_candidates": domain,
+        "skipped_existing": existing,
+        "definitions_added": leads,
+        "redirect_aliases_seen": redirects,
+        "quality_upgrades": upgrades,
+        "rejected_or_nondefinitional": rejected,
+    }
+
+def process_extra_tsv(
+    path: Path,
+    conn: sqlite3.Connection,
+    *,
+    casefold_aliases: bool,
+    yo_aliases: bool,
+    accent_aliases: bool,
+) -> int:
+    added = 0
+    source = f"extra:{path.name}"
+    with path.open("rt", encoding="utf-8-sig", errors="replace") as f:
+        for line in f:
+            line = line.rstrip("\r\n")
+            if not line or line.lstrip().startswith("#"):
+                continue
+            cols = line.split("\t")
+            if len(cols) < 2:
+                continue
+            word, definition = cols[0].strip(), cols[1].strip()
+            if not add_sense(conn, word, definition, source):
+                continue
+            add_link(
+                conn, word, word,
+                casefold_aliases=casefold_aliases,
+                yo_aliases=yo_aliases,
+                accent_aliases=accent_aliases,
+            )
+            if len(cols) >= 3:
+                for alias in cols[2].split("|"):
+                    if is_lookup_key(alias):
+                        add_link(
+                            conn, alias, word,
+                            casefold_aliases=casefold_aliases,
+                            yo_aliases=yo_aliases,
+                            accent_aliases=accent_aliases,
+                        )
+            added += 1
+    conn.commit()
+    return added
+
+
+def process_extra_jsonl(
+    path: Path,
+    conn: sqlite3.Connection,
+    *,
+    casefold_aliases: bool,
+    yo_aliases: bool,
+    accent_aliases: bool,
+) -> int:
+    """Import JSONL records: {"word":"...","definitions":[...],"aliases":[...]}"""
+    added = 0
+    source = f"extra:{path.name}"
+    with open_jsonl(path) as f:
+        for line in f:
+            try:
+                obj = json_loads_fast(line)
+            except Exception as exc:
+                if not is_json_decode_error(exc):
+                    raise
+                continue
+            word = obj.get("word")
+            if not is_lookup_key(word):
+                continue
+            defs = obj.get("definitions") or obj.get("glosses") or obj.get("definition") or []
+            if isinstance(defs, str):
+                defs = [defs]
+            any_added = False
+            for definition in defs:
+                if add_sense(conn, word, definition, source):
+                    added += 1
+                    any_added = True
+            if any_added:
+                add_link(
+                    conn, word, word,
+                    casefold_aliases=casefold_aliases,
+                    yo_aliases=yo_aliases,
+                    accent_aliases=accent_aliases,
+                )
+            for alias in obj.get("aliases") or []:
+                if is_lookup_key(alias):
+                    add_link(
+                        conn, alias, word,
+                        casefold_aliases=casefold_aliases,
+                        yo_aliases=yo_aliases,
+                        accent_aliases=accent_aliases,
+                    )
+    conn.commit()
+    return added
+
+
+
+def _quality_rewrite_context_parenthetical(lemma: str, text: str, source: str) -> tuple[str, bool]:
+    """Turn useful leading parentheses into prose, and discard pure metadata.
+
+    4.5 intentionally left many culturally/historically useful wrappers untouched,
+    which is why the real report still had 1.6k ``leading_parenthetical`` rows.
+    The goal here is not to erase context but to stop presenting it as a label.
+    """
+    split = _split_leading_parenthetical(text)
+    if not split:
+        return text, False
+    meta, rest = split
+    if not meta or not rest:
+        return text, False
+    meta_low = meta.casefold()
+    rest_low = rest.casefold()
+
+    # Accent/yo/orthographic spelling of the headword in parentheses is display
+    # metadata, e.g. "(Боровлево) деревня..." or "(О́льгин) русская фамилия".
+    def folded(v: str) -> str:
+        v = normalize_key(v).casefold()
+        v = unicodedata.normalize("NFD", v)
+        v = "".join(ch for ch in v if unicodedata.category(ch) != "Mn")
+        return v.replace("ё", "е").strip(" .,:;—–-")
+    if folded(meta) == folded(lemma) or (folded(lemma) and folded(lemma) in folded(meta) and len(meta) <= len(lemma) + 12):
+        return rest.lstrip(" ,;:—–-"), True
+
+    # Foreign spelling/transliteration wrappers are metadata when a complete
+    # Russian semantic class follows: "(Harry) мужское имя ...".  The same rule
+    # also handles compact alternate spellings such as "(Цице) река ...".
+    letters = sum(ch.isalpha() for ch in meta)
+    ascii_letters = sum(ch.isascii() and ch.isalpha() for ch in meta)
+    semantic_rest = bool(re.match(
+        r"^(?:мужское|женское|личное|русское|испанское|караимское|фамилия|имя|"
+        r"река|село|деревня|город|озеро|гора|сопка|термин|доктрина|инструмент|"
+        r"танк|реактор|оборудование|компьютер|платформа|устройство)\b",
+        rest, re.IGNORECASE,
+    ))
+    compact_alias = bool(re.fullmatch(r"[A-Za-zА-Яа-яЁёІіЇїЄєҐґ'’.-]+(?:\s+[A-Za-zА-Яа-яЁёІіЇїЄєҐґ'’.-]+)?", meta))
+    if semantic_rest and (
+        (letters >= 2 and ascii_letters / max(1, letters) >= 0.70)
+        or (compact_alias and not meta_low.startswith(("в ", "во ", "у ", "о ", "об ")))
+    ):
+        return rest.lstrip(" ,;:—–-"), True
+
+    # A comma-separated historical/foreign name list may contain nested
+    # parentheses.  If the actual definition that follows clearly identifies an
+    # object class, the list is lookup/display metadata rather than the meaning.
+    lemma_token = normalize_key(lemma).casefold().strip(" .,:;—–-")
+    if lemma_token and len(lemma_token) >= 2 and re.search(
+        rf"(?<![а-яёa-z0-9]){re.escape(lemma_token)}(?![а-яёa-z0-9])",
+        normalize_key(meta).casefold(), re.IGNORECASE,
+    ) and re.search(
+        r"\b(?:город|рек|сел|деревн|озер|гор|район|област|провинц|"
+        r"государств|царств|фамили|имя)\w*\b", rest[:120], re.IGNORECASE,
+    ):
+        return rest.lstrip(" ,;:—–-"), True
+
+    # Explicit abbreviation/expansion metadata should become the expansion, not
+    # stay as a grammatical label in the popup.
+    am = ABBREV_EXPANSION_RE.match(rest)
+    if am:
+        expanded = _compact_quality_text(am.group(1)).strip(" .;,:—–-")
+        if expanded:
+            return expanded[0].upper() + expanded[1:], True
+
+    # "(до 1993 г.) название ..." -> "Название ... до 1993 г.".  The date is
+    # part of the identity here, but no longer rendered as a leading label.
+    hm = LEADING_HISTORICAL_RANGE_RE.match(text)
+    if hm:
+        context = _compact_quality_text(hm.group("context"))
+        body = _compact_quality_text(hm.group("rest")).rstrip(".!? ")
+        return f"{body} {context}.", True
+
+    # Current place/entity definitions sometimes carry an old name only as a
+    # leading historical note: "(до 1948 года Ойсунки) село ...".  The old name
+    # is useful as an alias but not as visible meaning text.  When the remainder
+    # itself defines the current object, drop the wrapper.
+    if re.match(r"^(?:до|с)\s+(?:1[5-9]\d{2}|20\d{2})\b", meta_low) and re.match(
+        r"^(?:село|деревня|город|пос[ёе]лок|река|озеро|гора|район|область)\b",
+        rest, re.IGNORECASE,
+    ):
+        return rest.lstrip(" ,;:—–-"), True
+
+    # Wikipedia frequently exposes expansion/register metadata in parentheses.
+    # If the remainder is already a normal definition, simply discard that label.
+    if re.match(r"^(?:сокращ|аббревиат|жарг|субстантив|адъектив|предикатив)\w*\.?\b", meta_low):
+        return rest.lstrip(" ,;:—–-"), True
+
+    # "(КВ — Клим Ворошилов) опытный советский танк ..." / similar acronym
+    # expansions are not meanings themselves.
+    if re.search(r"\b[A-ZА-ЯЁ0-9-]{2,12}\s*[-—–:=]\s*", meta) and len(rest) >= 12:
+        return rest.lstrip(" ,;:—–-"), True
+
+    # "(расстоянием на множестве) называется однозначная функция ..." is an
+    # extraction-shaped definition.  The grammatical frame can be normalized to
+    # the actual semantic noun phrase without inventing content.
+    nm = re.match(r"^называется\s+(.+)$", rest, re.IGNORECASE | re.DOTALL)
+    if nm and len(nm.group(1).strip()) >= 12:
+        body = _compact_quality_text(nm.group(1)).strip(" ,;:—–-")
+        return body[0].upper() + body[1:], True
+
+    # Pure scientific/domain scopes are metadata.  Keep culturally identifying
+    # contexts (mythology, religion, historical geography) because they disambiguate
+    # names such as Bastet or Achaea.
+    pure_domain = bool(DOMAIN_CONTEXT_ROOTS.search(meta_low)) or bool(re.search(
+        r"(?:этолог|фармаколог|зоолог|ботаник|стихослож|метрик|гимнастик|лфк|"
+        r"номенклатур|лингвистик|фонетик|морфолог|синтакс)\w*", meta_low
+    ))
+    if pure_domain:
+        return rest.lstrip(" ,;:—–-"), True
+
+    # Selectional restrictions such as "(о растворителе)", "(об обмене)",
+    # "(о человеке)" are useful to lexicographers but are still metadata in the
+    # Kindle popup.  The headword and the lexical predicate in the remainder carry
+    # the meaning, so remove the wrapper rather than displaying it as a label.
+    if meta_low.startswith(("о ", "об ", "обо ")) and len(rest) >= 4:
+        dependent = rest_low.startswith((
+            "молекулы которого", "молекулы которой", "молекулы которых",
+            "части которого", "части которой", "части которых",
+            "элементы которого", "элементы которой", "элементы которых",
+        ))
+        if dependent:
+            semantic_head = PAREN_DEPENDENT_HEADS.get(meta_low)
+            if semantic_head:
+                body = f"{semantic_head}, {rest.lstrip(' ,;:—–-')}"
+                return body, True
+        else:
+            return rest.lstrip(" ,;:—–-"), True
+
+    # Usage-frame metadata can usually be dropped outright.
+    if re.match(r"^(?:обычно|только|преим(?:ущественно)?|в\s+речи|с\s+оттенком|редко|"
+                r"уголовн(?:ый|ая)\s+сленг|советск\.?|разг\.?|прост\.?|устар\.?|бранн\.?|"
+                r"перен\.?|книжн\.?|поэт\.?|ирон\.?|неодобр\.?)\b", meta_low):
+        return rest.lstrip(" ,;:—–-"), True
+
+    # Government/object slot metadata belongs in the sentence, not as a label:
+    # "(кого-либо) подвергать ампутации" -> "Подвергать кого-либо ампутации".
+    if re.fullmatch(r"(?:кого|кому|кем|чего|чему|чем|кого-либо|кому-либо|кем-либо|чего-либо|чему-либо|чем-либо)", meta_low):
+        words = rest.split(None, 1)
+        if words and re.match(r"^[А-Яа-яЁё-]+(?:ть|ти|чь|ет|ит|ать|ять)$", words[0], re.IGNORECASE):
+            body = words[0] + " " + meta + ((" " + words[1]) if len(words) > 1 else "")
+            return body[0].upper() + body[1:], True
+
+    # Keep genuinely semantic adjectives from the wrapper as ordinary prose.
+    if re.fullmatch(r"(?:врожд[ёе]нн(?:ый|ая|ое)|съ[ёе]мн(?:ый|ая|ое)|полностью)", meta_low):
+        body = f"{meta} {rest}".strip()
+        return body[0].upper() + body[1:], True
+
+    # Prefix notation such as "(радио-)передатчик" is a word-building note; the
+    # clean meaning is the joined lexical item.
+    if meta.endswith("-") and re.fullmatch(r"[A-Za-zА-Яа-яЁё-]{2,40}-", meta) and re.match(r"^[A-Za-zА-Яа-яЁё]", rest):
+        body = meta[:-1] + rest
+        return body[0].upper() + body[1:], True
+
+    # Foreign-script/etymological spellings are metadata when a real definition
+    # follows.  This catches Hebrew/Greek/Chinese notes that do not trip the ASCII
+    # transliteration heuristic above.
+    if re.match(
+        r"^(?:ивр(?:ит)?|греч(?:еск)?|лат(?:инск)?|англ(?:ийск)?|нем(?:ецк)?|фр(?:анц)?|"
+        r"исп(?:анск)?|кит(?:айск)?|яп(?:онск)?|санскритск|инг\.|чеч\.)\b", meta_low
+    ):
+        return rest.lstrip(" ,;:—–-"), True
+
+    # Speculative spelling notes from Dal/Wiktionary are not the meaning.
+    if meta_low.startswith(("вероятно ", "возможно ")) and len(rest) >= 8:
+        return rest.lstrip(" ,;:—–-"), True
+    if meta_low.startswith("говорят ") and rest_low.startswith("или "):
+        body = rest[4:].lstrip(" ,;:—–-")
+        return (body[0].upper() + body[1:]) if body else rest, True
+    if meta_low in {"санскритский термин", "геометрическое представление"} and len(rest) >= 8:
+        return rest.lstrip(" ,;:—–-"), True
+
+    # "(при печатании тканей) прибор ..." keeps the condition as normal prose.
+    if meta_low.startswith("при ") and len(rest) >= 8:
+        context = meta[4:].strip()
+        body = rest.rstrip(".!? ")
+        if context and context.casefold() not in body.casefold():
+            body = f"{body} при {context}"
+        return body.rstrip(".!? ") + ("." if source.startswith("ruwiki") else ""), True
+
+    # Cultural/historical location: preserve it as ordinary prose at the end.
+    if meta_low.startswith(("в ", "во ", "у ", "согласно ")):
+        body = rest.rstrip(".!? ")
+        # Avoid duplicating the same context when the body already contains it.
+        if meta_low not in body.casefold():
+            body = f"{body} {meta}"
+        return body.rstrip(".!? ") + ("." if source.startswith("ruwiki") else ""), True
+
+    # Adjectival semantic context should become prose instead of a label.
+    if meta_low in {"историческая", "исторический", "историческое", "высокий", "низкий"}:
+        body = f"{meta} {rest}".strip()
+        return body[0].upper() + body[1:], True
+
+    # A parenthesized semantic noun phrase followed by a dangling participle is
+    # better as one normal sentence: "(патологический рефлекс) проявляющийся...".
+    if BAD_REMAINDER_START_RE.match(rest) and not meta_low.startswith(("с ", "от ", "для ")):
+        body = f"{meta}, {rest}"
+        return body[0].upper() + body[1:], True
+
+    # "(персонаж ... мифологии) дочь Эола" -> ordinary semantic prose.
+    if "мифолог" in meta_low or "религи" in meta_low or "фольклор" in meta_low or "эпос" in meta_low:
+        body = rest.rstrip(".!? ") + ", " + meta
+        return body[0].upper() + body[1:] + ("." if source.startswith("ruwiki") else ""), True
+
+    return text, False
+
+
+def _quality_strip_leading_metadata(text: str, source: str) -> tuple[str, bool]:
+    """Strip non-semantic leading parentheses without deleting real meaning.
+
+    The source parsers already remove classic domain labels.  This second pass
+    targets metadata that surfaced in the full QA report: etymology/translation,
+    grammatical gender, model-index explanations, and mythology-domain wrappers.
+    Wikipedia parentheticals are only stripped when the remainder still looks like
+    a self-contained definition rather than a dangling participial clause.
+    """
+    original = text
+    text = strip_leading_context_parenthetical(text)
+    changed = text != original
+    for _ in range(2):
+        split = _split_leading_parenthetical(text)
+        if not split:
+            break
+        meta, rest = split
+        meta_low = meta.casefold()
+        remove = bool(META_PAREN_CONTENT_RE.search(meta_low))
+        if not remove and re.match(r'^[«"“„].{1,100}[»"”](?:\s*[сc])?$', meta):
+            remove = True
+        if not remove and re.match(r'^(?:HMS|USS|SMS|HMAS|RMS)\b', meta, re.IGNORECASE):
+            remove = True
+        # Acronym expansions such as "(non return to zero) код ..." are metadata,
+        # not the meaning itself.  Require a sufficiently long, non-dangling rest.
+        ascii_letters = sum(ch.isascii() and ch.isalpha() for ch in meta)
+        letters = sum(ch.isalpha() for ch in meta)
+        if (
+            not remove and source != "dal" and letters >= 2
+            and ascii_letters / max(1, letters) >= 0.75 and len(rest) >= 20
+            and not BAD_REMAINDER_START_RE.match(rest)
+        ):
+            remove = True
+        if not remove:
+            break
+        if BAD_REMAINDER_START_RE.match(rest):
+            # Removing the parenthetical would leave "выпущенный...", "известный..."
+            # and similar non-definitions. Keep it for the later QA/rejection step.
+            break
+        text = rest.lstrip(" ,;:—–-")
+        changed = True
+    return text, changed
+
+
+def _quality_normalize_definition(lemma: str, definition: str, source: str) -> tuple[str, set[str]]:
+    """Normalize an already parsed definition and report which cleanup rules fired."""
+    changes: set[str] = set()
+    text = unicodedata.normalize("NFC", str(definition or "")).strip()
+    if not text:
+        return "", changes
+
+    newer = EXAMPLE_TAIL_RE.sub("", text).rstrip()
+    if newer != text:
         text = newer
         changes.add("example_tail_removed")
     newer = NKRJA_TAIL_RE.sub("", text).rstrip()
@@ -4142,4 +5201,3 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
