@@ -1,5 +1,5 @@
-RU Max Clean 4.9 — notice for source data
-==========================================
+RU Max Clean — notice for source data
+=====================================
 
 The builder code and the linguistic/encyclopedic data are separate works.
 

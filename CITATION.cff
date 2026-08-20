@@ -4,6 +4,14 @@ message: If this project is useful in your research or reader workflow, please c
 type: software
 authors:
   - name: RU Max Clean contributors
-version: 4.9.1
+version: 1.0
 date-released: 2026-08-20
 license: MIT
+abstract: Программа-сборщик большого русско-русского словаря значений для KOReader.
+repository-code: https://github.com/Al3xJ0bs/ru-max-clean
+keywords:
+  - Russian dictionary
+  - KOReader
+  - StarDict
+  - linguistics
+  - literary reading

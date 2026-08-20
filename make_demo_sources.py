@@ -55,9 +55,11 @@ records = [
         {"glosses":["Адъектив. такой, где есть освещение"]}],
      "forms":[{"form":"освещенному","tags":["dat","sg"]}]},
 ]
-with gzip.open(ROOT / "sample_raw.jsonl.gz", "wt", encoding="utf-8") as f:
-    for obj in records:
-        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+raw_jsonl = "".join(json.dumps(obj, ensure_ascii=False) + "\n" for obj in records).encode("utf-8")
+# Keep the tracked fixture byte-for-byte stable across test runs.  The previous
+# gzip.open() call embedded the current wall-clock time in the header, making a
+# clean checkout appear dirty after every demo build.
+(ROOT / "sample_raw.jsonl.gz").write_bytes(gzip.compress(raw_jsonl, mtime=0))
 
 xml = '''<?xml version="1.0" encoding="utf-8"?>
 <dictionary>

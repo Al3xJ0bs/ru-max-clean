@@ -9,7 +9,7 @@ jobs:
     runs-on: windows-latest
     strategy:
       matrix:
-        python-version: ['3.11', '3.12']
+        python-version: ['3.10', '3.11', '3.12', '3.13']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -22,4 +22,21 @@ jobs:
           python -X utf8 test_reader_layers.py
           python -X utf8 test_source_manager.py
           python -X utf8 test_stage_cache.py
+          python -X utf8 test_package_builder.py
+          python -m compileall -q .
+
+  linux-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run portable regression suite
+        run: |
+          python -X utf8 test_builder.py
+          python -X utf8 test_reader_layers.py
+          python -X utf8 test_source_manager.py
+          python -X utf8 test_stage_cache.py
+          python -X utf8 test_package_builder.py
           python -m compileall -q .

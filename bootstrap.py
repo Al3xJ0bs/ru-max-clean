@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bootstrap/diagnostics for RU Max Clean 4.8 Turbo.
+"""Bootstrap/diagnostics for the RU Max Clean builder.
 
 The core builder uses only the Python standard library. Native packages below are
 optional accelerators; on an online Windows machine the launcher installs missing
