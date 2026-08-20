@@ -53,12 +53,14 @@ builder-базы. Кнопка быстрой пересборки предна�
 
 ```text
 py -3 -X utf8 test_builder.py
-py -3 -X utf8 test_reader_layers.py
 py -3 -X utf8 test_source_manager.py
 py -3 -X utf8 test_stage_cache.py
 py -3 -X utf8 test_package_builder.py
 py -3 -m compileall -q .
 ```
+
+Проверки reader-слоёв и внутреннего анализа корпуса запускаются только в CI и
+исходном репозитории разработчика; в пользовательский ZIP они не входят.
 
 Собрать архив программы вручную:
 
