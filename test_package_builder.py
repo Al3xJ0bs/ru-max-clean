@@ -22,6 +22,10 @@ def main() -> None:
         (root / "internal_book_coverage.py").write_text("print('internal coverage')\n", encoding="utf-8")
         (root / "test_reader_layers.py").write_text("print('internal scanner tests')\n", encoding="utf-8")
         (root / "BOOK_COVERAGE_NEW.json").write_text("{}\n", encoding="utf-8")
+        (root / "BOOK_COVERAGE_ITERATION.json").write_text("{}\n", encoding="utf-8")
+        (root / "BOOK_COVERAGE_ITERATION_FULL.json").write_text("{}\n", encoding="utf-8")
+        (root / "QUALITY_REPORT.json").write_text("{}\n", encoding="utf-8")
+        (root / "BUILD_INFO.json").write_text("{}\n", encoding="utf-8")
         (root / "RU-Max-Clean-4.9.1-PRODUCTION").mkdir()
         (root / "RU-Max-Clean-4.9.1-PRODUCTION" / "ru-max-clean.dict").write_bytes(b"not shipped")
         (root / "book.epub").write_bytes(b"not shipped")
@@ -52,6 +56,10 @@ def main() -> None:
             assert "internal_book_coverage.py" not in names
             assert "test_reader_layers.py" not in names
             assert "BOOK_COVERAGE_NEW.json" not in names
+            assert "BOOK_COVERAGE_ITERATION.json" not in names
+            assert "BOOK_COVERAGE_ITERATION_FULL.json" not in names
+            assert "QUALITY_REPORT.json" not in names
+            assert "BUILD_INFO.json" not in names
             assert "book.epub" not in names
             assert not any(name.endswith(".dict") for name in names)
             manifest = json.loads(archive.read("BUILD_MANIFEST.json"))
@@ -64,3 +72,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
