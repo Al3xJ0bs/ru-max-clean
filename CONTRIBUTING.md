@@ -9,11 +9,13 @@
 
 ```text
 py -3 -X utf8 test_builder.py
-py -3 -X utf8 test_reader_layers.py
 py -3 -X utf8 test_source_manager.py
 py -3 -X utf8 test_stage_cache.py
 py -3 -m compileall -q .
 ```
+
+В исходном репозитории и CI дополнительно запускается `test_reader_layers.py`;
+этот внутренний корпусный тест не входит в пользовательский builder-релиз.
 
 Для изменений качества добавьте узкий regression fixture и сравните
 `QUALITY_REPORT.json` с предыдущей source-complete сборкой. Кэш стадий, дампы
