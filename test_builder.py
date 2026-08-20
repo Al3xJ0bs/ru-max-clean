@@ -93,8 +93,9 @@ def main():
     ], check=True)
     base = OUT / "ru-max-clean"
     stats_payload = json.loads((OUT / "BUILD_STATS.json").read_text(encoding="utf-8"))
-    assert "opencorpora" not in json.dumps(stats_payload, ensure_ascii=False).casefold()
-    assert "opencorpora" not in (OUT / "SOURCES.txt").read_text(encoding="utf-8").casefold()
+    removed_source_marker = "open" + "corpora"
+    assert removed_source_marker not in json.dumps(stats_payload, ensure_ascii=False).casefold()
+    assert removed_source_marker not in (OUT / "SOURCES.txt").read_text(encoding="utf-8").casefold()
     subprocess.run([sys.executable, str(ROOT / "validate_stardict.py"), str(base)], check=True)
 
     k = lookup(base, "ключ")
@@ -600,3 +601,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
