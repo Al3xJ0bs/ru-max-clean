@@ -61,7 +61,7 @@ from stage_cache import StageCache, ArtifactCache, file_fingerprint, files_finge
 from progress_ui import ProgressTotals, render as progress_render, finish as progress_finish
 import human_report as report
 
-BUILDER_VERSION = "4.9.1"
+from version_info import BUILDER_VERSION
 
 # These versions are deliberately independent from BUILDER_VERSION. A future
 # presentation/reporting-only release can therefore reuse expensive parsed stages.

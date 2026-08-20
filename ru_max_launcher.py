@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Single Windows-oriented launcher/menu for RU Max Clean 4.9.1."""
+"""Single Windows-oriented launcher/menu for RU Max Clean."""
 from __future__ import annotations
 import argparse
 import datetime as dt
@@ -14,20 +14,34 @@ import threading
 import time
 from pathlib import Path
 
+from version_info import BUILDER_VERSION, PUBLIC_VERSION
+
 BASE = Path(__file__).resolve().parent
 OUT = BASE / "RU-Max-Clean"
 SOURCES = BASE / "sources"
 STATE = BASE / ".ru_max_build_state.json"
-VERSION = "4.9.1"
+VERSION = BUILDER_VERSION
+
+READER_PACKS: dict[str, tuple[str, str]] = {
+    "1": ("latin_classical.tsv", "Латынь: классические выражения"),
+    "2": ("latin_wiktionary.tsv", "Латынь: расширенный слой"),
+    "3": ("literary_archaic.tsv", "Архаика и церковнославянская лексика"),
+    "4": ("literary_wiktionary.tsv", "Расширенная историческая лексика"),
+    "5": ("french_literary.tsv", "Французская лексика в русской прозе"),
+    "6": ("literary_names.tsv", "Литературные имена и названия"),
+    "7": ("fantasy_terms.tsv", "Фэнтезийные термины"),
+    "8": ("literary_terms.tsv", "Историко-культурные термины"),
+    "9": ("phraseology.tsv", "Фразеологизмы"),
+}
 
 
 def header() -> None:
     print("=" * 68)
-    print(" RU Max Clean 4.9.1 TURBO READER LAYERS QUALITY")
+    print(f" RU Max Clean v{PUBLIC_VERSION}  |  builder {BUILDER_VERSION}")
     print("=" * 68)
-    print("Офлайн-словарь русского языка для KOReader: только значения,")
-    print("миллионы словоформ, редкая/старая и научно-профессиональная лексика.")
-    print("Лаунчер сам проверяет источники, окружение и валидирует StarDict.")
+    print("Сборщик большого русско-русского словаря значений для KOReader.")
+    print("Выберите профиль русского ядра и, при желании, дополнительные слои.")
+    print("Лаунчер сам проверяет окружение, кэши, источники и StarDict.")
     print()
 
 
@@ -178,13 +192,14 @@ def read_state() -> dict:
         return {}
 
 
-def save_state(profile: str) -> None:
+def save_state(profile: str, reader_packs: list[str] | None = None) -> None:
     data = {
         "version": VERSION,
         "profile": profile,
         "built_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
         "sources": fingerprints(read_manifest()),
         "local_build_fingerprint": local_build_fingerprint(),
+        "reader_packs": sorted(reader_packs or []),
     }
     STATE.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -226,6 +241,63 @@ def validate(log_path: Path | None = None) -> int:
         [sys.executable, "validate_stardict.py", str(OUT / "ru-max-clean")],
         log_path=log_path, title="Проверка StarDict",
     )
+
+
+def choose_reader_packs() -> list[str]:
+    """Ask once which optional dictionaries should accompany the core build."""
+    print("\nДополнительные словари (русское ядро собирается всегда):")
+    print("  0. Не собирать дополнительные слои")
+    print("  A. Собрать все слои")
+    for key, (_filename, label) in READER_PACKS.items():
+        print(f"  {key}. {label}")
+    choice = input("Выбор [0]: ").strip().casefold()
+    if choice in {"a", "все", "all"}:
+        return [filename for filename, _label in READER_PACKS.values()]
+    if choice in {"", "0"}:
+        return []
+    selected: list[str] = []
+    for key in choice.replace(",", " ").split():
+        item = READER_PACKS.get(key)
+        if item and item[0] not in selected:
+            selected.append(item[0])
+    if not selected:
+        print("Не удалось распознать выбор; дополнительные слои пропущены.")
+    return selected
+
+
+def build_reader_layers(pack_names: list[str]) -> int:
+    if not pack_names:
+        return 0
+    args = [
+        sys.executable, "build_reader_packs.py",
+        "--pack-dir", "reader_packs",
+        "--output-dir", "RU-Reader-Packs",
+    ]
+    for name in pack_names:
+        args.extend(["--pack", name])
+    return run_stream(args, title="Сборка выбранных дополнительных словарей")
+
+
+def guided_build() -> int:
+    """One coherent user workflow: profile, layers, source mode, build, validate."""
+    print("\nРусское ядро:")
+    print("  1. MAX — полный профиль, включая Wikipedia")
+    print("  2. Компактный — без большой Wikipedia")
+    profile_choice = input("Выбор [1]: ").strip()
+    profile = "lexical" if profile_choice == "2" else "max"
+    pack_names = choose_reader_packs()
+    mode = input("\nОбновлять источники перед сборкой? [Д/н]: ").strip().casefold()
+    offline = mode in {"н", "n", "нет", "no"}
+    print("\nСборка начинается. При повторном запуске неизменившиеся кэши будут переиспользованы.")
+    rc = build(profile, offline=offline, smart=not offline)
+    if rc:
+        return rc
+    rc = build_reader_layers(pack_names)
+    if rc == 0:
+        save_state(profile, pack_names)
+        if pack_names:
+            print("\nГОТОВО: русское ядро и выбранные дополнительные словари собраны.")
+    return rc
 
 
 def build(
@@ -326,27 +398,19 @@ def menu() -> int:
         header()
         print(hardware_summary())
         print()
-        print("  1. Умная MAX-сборка (обновления + Wikipedia + Quality)")
-        print("  2. Лексическая сборка (без 6-ГБ Wikipedia)")
-        print("  3. Офлайн MAX-сборка (только уже скачанные источники)")
-        print("  4. Только проверить и скачать обновления источников")
-        print("  5. Проверить уже собранный словарь")
-        print("  6. Быстрая MAX-пересборка из кэшей (включая готовый StarDict)")
-        print("  7. Диагностика компонентов, железа и кэшей")
-        print("  8. Полностью пересоздать кэши этапов (медленно)")
-        print("  9. Тест скорости gzip/bzip2 на ваших исходниках")
+        print("  1. Собрать словарь (профиль + дополнительные слои)")
+        print("  2. Быстро пересобрать русское ядро из кэшей")
+        print("  3. Проверить готовый русский словарь")
+        print("  4. Проверить/обновить источники")
+        print("  5. Диагностика компьютера и кэшей")
         print("  0. Выход")
         choice = input("\nВыбор: ").strip()
         actions = {
-            "1": lambda: build("max", smart=True),
-            "2": lambda: build("lexical", smart=True),
-            "3": lambda: build("max", offline=True, smart=False),
+            "1": guided_build,
+            "2": lambda: build("max", smart=False, quick=True),
+            "3": validate,
             "4": check_sources,
-            "5": validate,
-            "6": lambda: build("max", smart=False, quick=True),
-            "7": diagnostics,
-            "8": lambda: build("max", smart=False, rebuild_stage_cache=True),
-            "9": lambda: subprocess.call([sys.executable, "benchmark_compression.py"], cwd=BASE, env=turbo_env()),
+            "5": diagnostics,
         }
         if choice == "0":
             return 0
@@ -360,11 +424,12 @@ def menu() -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--action", choices=["max", "lexical", "offline", "quick", "updates", "validate", "force", "diagnostics", "rebuild-caches", "benchmark"])
+    ap.add_argument("--action", choices=["guided", "max", "lexical", "offline", "quick", "updates", "validate", "force", "diagnostics", "rebuild-caches", "benchmark"])
     args = ap.parse_args()
     if not args.action:
         return menu()
     return {
+        "guided": guided_build,
         "max": lambda: build("max", smart=True),
         "lexical": lambda: build("lexical", smart=True),
         "offline": lambda: build("max", offline=True, smart=False),

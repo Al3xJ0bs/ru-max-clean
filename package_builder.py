@@ -37,6 +37,13 @@ EXCLUDED_SUFFIXES = {
     ".fb2",
     ".log",
 }
+EXCLUDED_FILES = {
+    # Corpus scanner and its reports are internal QA tools, not part of the
+    # end-user builder release.
+    "scan_book_coverage.py",
+    "BOOK_COVERAGE_NEW.json",
+    "BOOK_COVERAGE_WITH_LAYERS.json",
+}
 ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
 
 
@@ -46,6 +53,8 @@ def _excluded(path: Path) -> bool:
     if any(part in EXCLUDED_DIRS for part in path.parts):
         return True
     if path.name.startswith(EXCLUDED_PREFIXES):
+        return True
+    if path.name in EXCLUDED_FILES:
         return True
     return path.suffix.lower() in EXCLUDED_SUFFIXES
 
@@ -76,6 +85,13 @@ def package_files(root: Path) -> list[Path]:
 
 def _builder_version(root: Path) -> str:
     version_file = root / "VERSION.txt"
+    if not version_file.exists():
+        return "unknown"
+    return version_file.read_text(encoding="utf-8-sig").strip().split()[0]
+
+
+def _public_version(root: Path) -> str:
+    version_file = root / "PUBLIC_VERSION.txt"
     if not version_file.exists():
         return "unknown"
     return version_file.read_text(encoding="utf-8-sig").strip().split()[0]
@@ -136,12 +152,17 @@ def build_package(root: Path, output: Path, public_version: str) -> dict[str, ob
 def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parent)
-    parser.add_argument("--public-version", default="1.2")
+    parser.add_argument(
+        "--public-version",
+        default=None,
+        help="Public release version (defaults to PUBLIC_VERSION.txt)",
+    )
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
     root = args.root.resolve()
-    output = args.output or root / "dist" / f"RU-Max-Clean-Builder-v{args.public_version}.zip"
-    result = build_package(root, output, args.public_version)
+    public_version = args.public_version or _public_version(root)
+    output = args.output or root / "dist" / f"RU-Max-Clean-Builder-v{public_version}.zip"
+    result = build_package(root, output, public_version)
     print(json.dumps({k: v for k, v in result.items() if k != "manifest"}, ensure_ascii=False, indent=2))
     return 0
 

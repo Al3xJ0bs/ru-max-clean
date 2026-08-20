@@ -23,10 +23,11 @@ from pathlib import Path
 from typing import Iterable
 
 from progress_ui import render as progress_render, finish as progress_finish
+from version_info import BUILDER_VERSION
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "RU-Max-Clean/4.9.1 (+KOReader offline dictionary builder)"
+    f"RU-Max-Clean/{BUILDER_VERSION} (+KOReader offline dictionary builder)"
 )
 RETRYABLE_HTTP = frozenset({408, 425, 429, 500, 502, 503, 504})
 

@@ -17,6 +17,8 @@ def main() -> None:
         (root / "build_ru_max_clean.py").write_text("print('builder')\n", encoding="utf-8")
         (root / "reader_packs").mkdir()
         (root / "reader_packs" / "phraseology.tsv").write_text("a\tb\n", encoding="utf-8")
+        (root / "scan_book_coverage.py").write_text("print('internal')\n", encoding="utf-8")
+        (root / "BOOK_COVERAGE_NEW.json").write_text("{}\n", encoding="utf-8")
         (root / "RU-Max-Clean-4.9.1-PRODUCTION").mkdir()
         (root / "RU-Max-Clean-4.9.1-PRODUCTION" / "ru-max-clean.dict").write_bytes(b"not shipped")
         (root / "book.epub").write_bytes(b"not shipped")
@@ -33,6 +35,8 @@ def main() -> None:
             assert "BUILD_MANIFEST.json" in names
             assert "build_ru_max_clean.py" in names
             assert "reader_packs/phraseology.tsv" in names
+            assert "scan_book_coverage.py" not in names
+            assert "BOOK_COVERAGE_NEW.json" not in names
             assert not any(name.endswith((".dict", ".epub")) for name in names)
             manifest = json.loads(archive.read("BUILD_MANIFEST.json"))
             assert manifest["package_kind"] == "builder-only"
