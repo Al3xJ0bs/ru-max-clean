@@ -36,6 +36,16 @@ class ReaderLayerTests(unittest.TestCase):
         self.assertNotIn("priori", unknown)
         self.assertIn("неизвестное", unknown)
 
+    def test_phrase_and_single_word_hits_are_not_double_counted(self) -> None:
+        report = scan_coverage(
+            [("demo", "alpha beta alpha")],
+            KnownKeyMatcher(["alpha", "alpha beta"]),
+        )
+        self.assertEqual(report["tokens_total"], 3)
+        self.assertEqual(report["known_tokens"], 3)
+        self.assertEqual(report["unknown_tokens"], 0)
+        self.assertEqual(report["coverage_percent"], 100.0)
+
     def test_pack_loader(self) -> None:
         path = Path(__file__).with_name("reader_packs") / "latin_classical.tsv"
         entries = load_pack_tsv(path)
@@ -44,6 +54,15 @@ class ReaderLayerTests(unittest.TestCase):
         french = load_pack_tsv(Path(__file__).with_name("reader_packs") / "french_literary.tsv")
         self.assertGreaterEqual(len(french), 70)
         self.assertTrue(any(entry.word == "monsieur" and "месье" in entry.aliases for entry in french))
+        names = load_pack_tsv(Path(__file__).with_name("reader_packs") / "literary_names.tsv")
+        self.assertGreaterEqual(len(names), 90)
+        self.assertTrue(any(entry.word == "Фродо" and "Фродо" in entry.aliases for entry in names))
+        fantasy = load_pack_tsv(Path(__file__).with_name("reader_packs") / "fantasy_terms.tsv")
+        self.assertGreaterEqual(len(fantasy), 15)
+        self.assertTrue(any(entry.word == "палантир" for entry in fantasy))
+        literary_terms = load_pack_tsv(Path(__file__).with_name("reader_packs") / "literary_terms.tsv")
+        self.assertGreaterEqual(len(literary_terms), 5)
+        self.assertTrue(any(entry.word == "фельдкурат" for entry in literary_terms))
 
     def test_stardict_index_stream(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

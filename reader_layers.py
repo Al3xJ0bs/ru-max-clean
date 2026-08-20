@@ -247,7 +247,6 @@ def scan_coverage(texts: Sequence[tuple[str, str]], matcher: KnownKeyMatcher) ->
     descending frequency and then by normalised spelling.
     """
     counts: Counter[str] = Counter()
-    known_direct: Counter[str] = Counter()
     phrase_covered: Counter[str] = Counter()
     raw_forms: dict[str, Counter[str]] = defaultdict(Counter)
     scripts: Counter[str] = Counter()
@@ -266,8 +265,6 @@ def scan_coverage(texts: Sequence[tuple[str, str]], matcher: KnownKeyMatcher) ->
             counts[normal] += 1
             raw_forms[normal][token] += 1
             scripts[script_of(token)] += 1
-            if normal in matcher.single_keys:
-                known_direct[normal] += 1
         file_stats.append({
             "file": label,
             "tokens": sum(local.values()),
@@ -277,10 +274,13 @@ def scan_coverage(texts: Sequence[tuple[str, str]], matcher: KnownKeyMatcher) ->
                 for key, n in local.items()
             ),
         })
-    known = sum(known_direct.values()) + sum(phrase_covered.values())
     total = sum(counts.values())
     unknown_rows = _counter_payload(counts, raw_forms, matcher, phrase_covered)
     unknown_total = sum(int(row["count"]) for row in unknown_rows)
+    # Phrase hits and direct single-word hits overlap frequently (for example,
+    # a pack may contain both ``alpha`` and ``alpha beta``).  Derive the known
+    # total from the residual unknown count so no token can be counted twice.
+    known = total - unknown_total
     unknown_scripts: Counter[str] = Counter()
     for row in unknown_rows:
         unknown_scripts[str(row["script"])] += int(row["count"])

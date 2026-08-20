@@ -9,6 +9,15 @@ forms of address, titles, and common expressions in Russian classical prose. It
 is deliberately separate from the Latin packs because short French function
 words can collide with Latin keys.
 
+literary_names.tsv contains curated characters, historical figures, and places
+from the literary corpus. fantasy_terms.tsv contains short explanations of
+world-specific fantasy vocabulary. Both layers remain optional and are kept
+outside the Russian core to avoid treating proper names as ordinary Russian
+definitions.
+
+literary_terms.tsv holds a small separate layer for historical and
+culture-specific words such as military, Spanish, and medieval titles.
+
 latin_wiktionary.tsv and literary_wiktionary.tsv are extracted from the local
 Russian Wiktionary/Kaikki dump.  They retain Russian glosses only; forms,
 examples, placeholders, and obvious metadata are filtered by

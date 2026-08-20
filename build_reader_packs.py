@@ -32,6 +32,9 @@ PACK_METADATA: dict[str, dict[str, str]] = {
     "literary_wiktionary": {"language": "cu/orv/ru-old", "kind": "Russian-glossed historical lexemes"},
     "phraseology": {"language": "ru", "kind": "fixed expressions"},
     "french_literary": {"language": "fr", "kind": "French words and expressions in Russian literary prose"},
+    "literary_names": {"language": "ru", "kind": "proper names and places from Russian literary reading"},
+    "fantasy_terms": {"language": "ru", "kind": "fantasy terminology and world-specific concepts"},
+    "literary_terms": {"language": "ru", "kind": "historical and culture-specific literary terms"},
 }
 
 

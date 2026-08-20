@@ -136,7 +136,7 @@ def build_package(root: Path, output: Path, public_version: str) -> dict[str, ob
 def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parent)
-    parser.add_argument("--public-version", default="1.0")
+    parser.add_argument("--public-version", default="1.2")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
     root = args.root.resolve()
