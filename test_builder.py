@@ -96,6 +96,8 @@ def main():
     removed_source_marker = "open" + "corpora"
     assert removed_source_marker not in json.dumps(stats_payload, ensure_ascii=False).casefold()
     assert removed_source_marker not in (OUT / "SOURCES.txt").read_text(encoding="utf-8").casefold()
+    build_info = json.loads((OUT / "BUILD_INFO.json").read_text(encoding="utf-8"))
+    assert removed_source_marker not in json.dumps(build_info, ensure_ascii=False).casefold()
     subprocess.run([sys.executable, str(ROOT / "validate_stardict.py"), str(base)], check=True)
 
     k = lookup(base, "ключ")
