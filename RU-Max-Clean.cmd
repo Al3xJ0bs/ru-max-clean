@@ -2,7 +2,7 @@
 setlocal EnableExtensions DisableDelayedExpansion
 cd /d "%~dp0"
 chcp 65001 >nul 2>&1
-title RU Max Clean v1.4
+title RU Max Clean v1.5
 
 rem Keep this CMD file ASCII-only. All localized UI is printed by Python.
 set "PYTHONUTF8=1"

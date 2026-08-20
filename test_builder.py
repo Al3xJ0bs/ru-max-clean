@@ -8,9 +8,15 @@ import tarfile
 import zlib
 from pathlib import Path
 
+from build_ru_max_clean import is_lookup_key
+
 ROOT = Path(__file__).resolve().parent
 OUT = ROOT / "_test_output"
 LEGACY = ROOT / "_test_dal.tar.bz2"
+
+assert is_lookup_key("è")
+assert is_lookup_key("à")
+assert is_lookup_key("Brüder")
 
 
 def lookup(base: Path, word: str):
@@ -591,3 +597,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

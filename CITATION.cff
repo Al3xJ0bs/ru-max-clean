@@ -4,7 +4,7 @@ message: If this project is useful in your research or reader workflow, please c
 type: software
 authors:
   - name: RU Max Clean contributors
-version: 1.4
+version: 1.5
 date-released: 2026-08-20
 license: MIT
 abstract: Программа-сборщик большого русско-русского словаря значений для KOReader с независимыми литературными, языковыми и редакторскими слоями.
