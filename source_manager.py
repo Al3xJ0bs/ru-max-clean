@@ -18,6 +18,7 @@ import threading
 import concurrent.futures
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Iterable
@@ -30,6 +31,47 @@ USER_AGENT = (
     f"RU-Max-Clean/{BUILDER_VERSION} (+KOReader offline dictionary builder)"
 )
 RETRYABLE_HTTP = frozenset({408, 425, 429, 500, 502, 503, 504})
+DOWNLOAD_WORKERS_DEFAULT = 2
+DOWNLOAD_WORKERS_MAX = 4
+RANGE_RETRY_WAVES = 5
+
+# Wikimedia and Kaikki are happy with a sustained stream but may reject a burst
+# of byte-range requests with HTTP 429.  Keep a tiny per-host request gate so a
+# retry from one range cannot immediately stampede the same host from the other
+# range workers.  The gate is process-local and deliberately does not serialize
+# data reads: it only spaces request starts and honours a host-wide cooldown.
+_HOST_GATE_LOCK = threading.Lock()
+_HOST_NEXT_REQUEST: dict[str, float] = {}
+_HOST_COOLDOWN_UNTIL: dict[str, float] = {}
+
+
+def _host_key(req: urllib.request.Request) -> str:
+    return urllib.parse.urlsplit(req.full_url).netloc.casefold()
+
+
+def _request_interval() -> float:
+    try:
+        return max(0.0, min(5.0, float(os.environ.get("RU_MAX_DOWNLOAD_REQUEST_INTERVAL", "0.15"))))
+    except ValueError:
+        return 0.15
+
+
+def _wait_for_request_slot(req: urllib.request.Request) -> None:
+    host = _host_key(req)
+    interval = _request_interval()
+    with _HOST_GATE_LOCK:
+        now = time.monotonic()
+        target = max(now, _HOST_NEXT_REQUEST.get(host, 0.0), _HOST_COOLDOWN_UNTIL.get(host, 0.0))
+        _HOST_NEXT_REQUEST[host] = target + interval
+    delay = target - now
+    if delay > 0:
+        time.sleep(delay)
+
+
+def _cooldown_host(req: urllib.request.Request, delay: float) -> None:
+    host = _host_key(req)
+    with _HOST_GATE_LOCK:
+        _HOST_COOLDOWN_UNTIL[host] = max(_HOST_COOLDOWN_UNTIL.get(host, 0.0), time.monotonic() + max(0.0, delay))
 
 
 def _log(msg: str) -> None:
@@ -65,11 +107,15 @@ def _retry_delay(exc: urllib.error.HTTPError, attempt: int) -> float:
         if retry_after:
             return min(30.0, max(0.25, float(retry_after)))
     except (TypeError, ValueError):
-        pass
+        try:
+            retry_at = email.utils.parsedate_to_datetime(str(retry_after)).timestamp()
+            return min(30.0, max(0.25, retry_at - time.time()))
+        except (TypeError, ValueError, OverflowError):
+            pass
     return min(30.0, 0.5 * (2 ** attempt))
 
 
-def _open_with_retry(req: urllib.request.Request, timeout: int = 90):
+def _open_with_retry(req: urllib.request.Request, timeout: int = 90, *, retry_rate_limit: bool = True):
     """Open a request with a small, deterministic retry budget.
 
     Wikimedia/Kaikki occasionally answer a burst of range requests with 429 or
@@ -82,11 +128,14 @@ def _open_with_retry(req: urllib.request.Request, timeout: int = 90):
         max_retries = 4
     for attempt in range(max_retries + 1):
         try:
+            _wait_for_request_slot(req)
             return _http_open(req, timeout=timeout)
         except urllib.error.HTTPError as exc:
-            if exc.code not in RETRYABLE_HTTP or attempt >= max_retries:
+            if exc.code not in RETRYABLE_HTTP or attempt >= max_retries or (exc.code == 429 and not retry_rate_limit):
                 raise
             delay = _retry_delay(exc, attempt)
+            if exc.code == 429:
+                _cooldown_host(req, delay)
             _log(f"[DOWNLOAD RETRY] HTTP {exc.code}; повтор через {delay:.1f} с")
             exc.close()
             time.sleep(delay)
@@ -166,10 +215,11 @@ def _download_parallel_ranges(url: str, destination: Path, label: str, total: in
     destination.parent.mkdir(parents=True, exist_ok=True)
     temp = Path(str(destination) + ".part")
     temp.unlink(missing_ok=True)
-    # Four connections are fast enough for the large public dumps while staying
-    # below common per-client request limits.  Users may explicitly lower/raise
-    # this through RU_MAX_DOWNLOAD_WORKERS, but never above a safe hard cap.
-    workers = max(2, min(int(workers), 4))
+    # Two connections are the safe default for Wikimedia/Kaikki.  Users may
+    # explicitly lower/raise this through RU_MAX_DOWNLOAD_WORKERS, but never
+    # above a safe hard cap.  If a host still answers 429, the wave scheduler
+    # below backs off to one connection and retries only failed ranges.
+    workers = max(2, min(int(workers), DOWNLOAD_WORKERS_MAX))
     chunk_size = (total + workers - 1) // workers
     pieces: list[tuple[int, int, Path]] = []
     for i in range(workers):
@@ -180,11 +230,19 @@ def _download_parallel_ranges(url: str, destination: Path, label: str, total: in
         pieces.append((start, end, Path(f"{temp}.{i:02d}")))
     progress_lock = threading.Lock()
     done = 0
+    piece_done: dict[Path, int] = {part: 0 for _start, _end, part in pieces}
     meta_holder: dict[str, object] = {}
 
     def fetch(piece: tuple[int, int, Path]) -> None:
         nonlocal done
         start, end, part = piece
+        # A failed range may have written a partial file before the server
+        # returned 429.  Remove its contribution from the aggregate progress
+        # before retrying so the displayed percentage never jumps past 100%.
+        with progress_lock:
+            done -= piece_done.get(part, 0)
+            piece_done[part] = 0
+            progress_render(label, max(0, done), total, unit="bytes")
         part.unlink(missing_ok=True)
         req = urllib.request.Request(
             url,
@@ -195,7 +253,10 @@ def _download_parallel_ranges(url: str, destination: Path, label: str, total: in
             },
             method="GET",
         )
-        with _open_with_retry(req, timeout=timeout) as response, part.open("wb") as out:
+        # Let the range-wave scheduler see 429 immediately.  Retrying it inside
+        # every range worker would keep the original burst alive for several
+        # seconds and defeat adaptive downshifting.
+        with _open_with_retry(req, timeout=timeout, retry_rate_limit=False) as response, part.open("wb") as out:
             if getattr(response, "status", 200) != 206 or not response.headers.get("Content-Range"):
                 raise OSError("server does not support HTTP range downloads")
             content_range = str(response.headers.get("Content-Range") or "")
@@ -216,17 +277,48 @@ def _download_parallel_ranges(url: str, destination: Path, label: str, total: in
                 out.write(block)
                 local_done += len(block)
                 with progress_lock:
-                    done += len(block)
+                    delta = local_done - piece_done.get(part, 0)
+                    done += delta
+                    piece_done[part] = local_done
                     progress_render(label, done, total, unit="bytes")
             expected = end - start + 1
             if local_done != expected:
                 raise OSError(f"incomplete range {start}-{end}: expected {expected}, got {local_done}")
 
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(pieces), thread_name_prefix="ru-max-dl") as pool:
-            futures = [pool.submit(fetch, piece) for piece in pieces]
-            for fut in concurrent.futures.as_completed(futures):
-                fut.result()
+        pending = list(pieces)
+        active_workers = workers
+        wave = 0
+        while pending:
+            failures: list[tuple[tuple[int, int, Path], Exception]] = []
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(active_workers, len(pending)),
+                thread_name_prefix="ru-max-dl",
+            ) as pool:
+                future_map = {pool.submit(fetch, piece): piece for piece in pending}
+                for fut in concurrent.futures.as_completed(future_map):
+                    piece = future_map[fut]
+                    try:
+                        fut.result()
+                    except Exception as exc:
+                        failures.append((piece, exc))
+            if not failures:
+                break
+
+            rate_limited = [exc for _piece, exc in failures if isinstance(exc, urllib.error.HTTPError) and exc.code == 429]
+            if len(rate_limited) != len(failures):
+                raise failures[0][1]
+            wave += 1
+            if wave > RANGE_RETRY_WAVES:
+                raise failures[0][1]
+            active_workers = max(1, active_workers // 2)
+            delay = max(_retry_delay(exc, wave) for exc in rate_limited)
+            _log(
+                f"[DOWNLOAD THROTTLE] {label}: HTTP 429; повтор диапазонов "
+                f"через {delay:.1f} с, соединений: {active_workers}"
+            )
+            time.sleep(delay)
+            pending = [piece for piece, _exc in failures]
         digest = hashlib.sha256()
         with temp.open("wb") as out:
             for _start, _end, part in pieces:
@@ -248,6 +340,8 @@ def _download_parallel_ranges(url: str, destination: Path, label: str, total: in
             "downloaded_at": _now(),
             "local_size": destination.stat().st_size,
             "download_mode": f"parallel-ranges:{len(pieces)}",
+            "download_workers": active_workers,
+            "rate_limit_waves": wave,
         })
         lm = meta.get("last_modified")
         if isinstance(lm, str) and lm:
@@ -328,9 +422,9 @@ class SourceCache:
         self.offline = offline
         self.force_refresh = force_refresh
         try:
-            self.download_workers = max(1, min(4, int(os.environ.get("RU_MAX_DOWNLOAD_WORKERS", "4"))))
+            self.download_workers = max(1, min(DOWNLOAD_WORKERS_MAX, int(os.environ.get("RU_MAX_DOWNLOAD_WORKERS", str(DOWNLOAD_WORKERS_DEFAULT)))))
         except ValueError:
-            self.download_workers = 4
+            self.download_workers = DOWNLOAD_WORKERS_DEFAULT
         self._lock = threading.RLock()
         try:
             data = json.loads(self.manifest_path.read_text(encoding="utf-8"))
