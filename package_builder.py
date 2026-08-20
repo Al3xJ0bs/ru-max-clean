@@ -41,6 +41,9 @@ EXCLUDED_FILES = {
     # Corpus scanner and its reports are internal QA tools, not part of the
     # end-user builder release.
     "scan_book_coverage.py",
+    "reader_layers.py",
+    "internal_book_coverage.py",
+    "test_reader_layers.py",
     "BOOK_COVERAGE_NEW.json",
     "BOOK_COVERAGE_WITH_LAYERS.json",
 }

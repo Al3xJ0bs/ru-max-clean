@@ -22,7 +22,7 @@ from build_ru_max_clean import (
     is_lookup_key,
     normalize_key,
 )
-from reader_layers import PackEntry, load_pack_tsv
+from reader_pack_loader import PackEntry, load_pack_tsv
 
 
 PACK_METADATA: dict[str, dict[str, str]] = {
