@@ -47,6 +47,14 @@ EXCLUDED_FILES = {
     "test_reader_layers.py",
     "BOOK_COVERAGE_NEW.json",
     "BOOK_COVERAGE_WITH_LAYERS.json",
+    "BUILD_STATS.json",
+    "BUILD_INFO.json",
+    "QUALITY_REPORT.json",
+    "QUALITY_REPORT.txt",
+    "QUALITY_REVIEW.tsv",
+    "QUALITY_ONOMASTICS.tsv",
+    "QUALITY_CONCISE.tsv",
+    "SOURCES.txt",
     "test_books/make_dictionary_test_book.py",
 }
 TEST_BOOK_FILES = {
@@ -67,6 +75,8 @@ def _excluded(path: Path) -> bool:
     if path.name.startswith(EXCLUDED_PREFIXES):
         return True
     if path.name in EXCLUDED_FILES or path.as_posix() in EXCLUDED_FILES:
+        return True
+    if path.name.startswith("BOOK_COVERAGE_"):
         return True
     return path.suffix.lower() in EXCLUDED_SUFFIXES
 
@@ -181,3 +191,4 @@ def main(argv: Iterable[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
