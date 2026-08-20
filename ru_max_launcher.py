@@ -32,6 +32,7 @@ READER_PACKS: dict[str, tuple[str, str]] = {
     "7": ("fantasy_terms.tsv", "Фэнтезийные термины"),
     "8": ("literary_terms.tsv", "Историко-культурные термины"),
     "9": ("phraseology.tsv", "Фразеологизмы"),
+    "10": ("literary_abbreviations.tsv", "Литературные сокращения и пометы"),
 }
 
 
@@ -445,3 +446,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

@@ -57,6 +57,17 @@ class ReaderLayerTests(unittest.TestCase):
         names = load_pack_tsv(Path(__file__).with_name("reader_packs") / "literary_names.tsv")
         self.assertGreaterEqual(len(names), 90)
         self.assertTrue(any(entry.word == "Фродо" and "Фродо" in entry.aliases for entry in names))
+        self.assertTrue(any(entry.word == "Кламм" and "Кламма" in entry.aliases for entry in names))
+        self.assertTrue(any(entry.word == "Санчо" and "Панса" in entry.aliases for entry in names))
+
+    def test_literary_abbreviations_pack(self) -> None:
+        entries = load_pack_tsv(
+            Path(__file__).with_name("reader_packs") / "literary_abbreviations.tsv"
+        )
+        words = {entry.word for entry in entries}
+        self.assertIn("г-жа", words)
+        self.assertIn("стр", words)
+        self.assertTrue(any(entry.word == "г-н" and "г-ном" in entry.aliases for entry in entries))
         fantasy = load_pack_tsv(Path(__file__).with_name("reader_packs") / "fantasy_terms.tsv")
         self.assertGreaterEqual(len(fantasy), 15)
         self.assertTrue(any(entry.word == "палантир" for entry in fantasy))
@@ -91,3 +102,4 @@ class ReaderLayerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+

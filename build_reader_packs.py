@@ -35,6 +35,7 @@ PACK_METADATA: dict[str, dict[str, str]] = {
     "literary_names": {"language": "ru", "kind": "proper names and places from Russian literary reading"},
     "fantasy_terms": {"language": "ru", "kind": "fantasy terminology and world-specific concepts"},
     "literary_terms": {"language": "ru", "kind": "historical and culture-specific literary terms"},
+    "literary_abbreviations": {"language": "ru", "kind": "editorial abbreviations common in literary editions"},
 }
 
 
@@ -129,3 +130,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
