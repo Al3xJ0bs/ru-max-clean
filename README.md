@@ -40,7 +40,7 @@ RU Max Clean помогает быстро понять слово прямо в
   StarDict;
 - собирает отдельные reader-пакеты:
   `latin_classical`, `latin_wiktionary`, `literary_archaic`,
-  `literary_wiktionary` и `phraseology`;
+  `literary_wiktionary`, `french_literary` и `phraseology`;
 - сканирует EPUB, FB2, TXT и HTML-книги и показывает покрытие словарём.
 
 ## Быстрый старт

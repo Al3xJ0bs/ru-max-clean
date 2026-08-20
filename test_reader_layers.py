@@ -41,6 +41,9 @@ class ReaderLayerTests(unittest.TestCase):
         entries = load_pack_tsv(path)
         self.assertGreaterEqual(len(entries), 40)
         self.assertTrue(any("статус-кво" in entry.aliases for entry in entries))
+        french = load_pack_tsv(Path(__file__).with_name("reader_packs") / "french_literary.tsv")
+        self.assertGreaterEqual(len(french), 70)
+        self.assertTrue(any(entry.word == "monsieur" and "месье" in entry.aliases for entry in french))
 
     def test_stardict_index_stream(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -4,6 +4,11 @@ Reader-layer source packs
 latin_classical.tsv, literary_archaic.tsv, and phraseology.tsv are curated seed
 records maintained with this project.
 
+french_literary.tsv is a curated French companion layer for French passages,
+forms of address, titles, and common expressions in Russian classical prose. It
+is deliberately separate from the Latin packs because short French function
+words can collide with Latin keys.
+
 latin_wiktionary.tsv and literary_wiktionary.tsv are extracted from the local
 Russian Wiktionary/Kaikki dump.  They retain Russian glosses only; forms,
 examples, placeholders, and obvious metadata are filtered by
