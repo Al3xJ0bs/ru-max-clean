@@ -71,13 +71,6 @@ def source_wiktionary(stats: Mapping[str, Any]) -> None:
     ])
 
 
-def source_opencorpora(stats: Mapping[str, Any]) -> None:
-    section("OPENCORPORA / МОРФОЛОГИЯ", [
-        ("Лемм обработано", fmt_int(stats.get("lemmas_seen", 0))),
-        ("Словоформ связано", fmt_int(stats.get("forms_seen", 0))),
-    ])
-
-
 def source_wikidata(stats: Mapping[str, Any]) -> None:
     section("WIKIDATA LEXEMES", [
         ("Сущностей обработано", fmt_int(stats.get("entities_processed", 0))),

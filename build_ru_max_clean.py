@@ -2,9 +2,9 @@
 """Build RU Max Clean: a Russian StarDict dictionary for KOReader.
 
 Displayed articles contain meanings only. Inflected forms and spelling variants are
-lookup keys only. The builder streams Wiktextract/Kaikki and OpenCorpora data into
-SQLite, then writes a compact StarDict index where aliases reuse canonical article
-byte ranges instead of duplicating definition text.
+lookup keys only. The builder streams Wiktextract/Kaikki and other enabled sources
+into SQLite, then writes a compact StarDict index where aliases reuse canonical
+article byte ranges instead of duplicating definition text.
 """
 from __future__ import annotations
 
@@ -65,7 +65,7 @@ from version_info import BUILDER_VERSION
 
 # These versions are deliberately independent from BUILDER_VERSION. A future
 # presentation/reporting-only release can therefore reuse expensive parsed stages.
-LEXICAL_STAGE_RULES = "lexical-v1"
+LEXICAL_STAGE_RULES = "lexical-v2-sources"
 WIKIPEDIA_STAGE_RULES = "wikipedia-v1"
 RESOLVE_STAGE_RULES = "resolve-v1"
 QUALITY_STAGE_RULES = "semantic-clean-v10"
@@ -83,12 +83,6 @@ def _builder_code_sha256() -> str:
     return digest.hexdigest()
 
 KAIKKI_URL = "https://kaikki.org/ruwiktionary/raw-wiktextract-data.jsonl.gz"
-OPENCORPORA_URLS = (
-    "https://opencorpora.org/files/export/dict/dict.opcorpora.xml.bz2",
-    "https://www.opencorpora.org/files/export/dict/dict.opcorpora.xml.bz2",
-)
-# Compatibility for third-party scripts written against 4.5 and earlier.
-OPENCORPORA_URL = OPENCORPORA_URLS[0]
 WIKIDATA_LEXEMES_URL = "https://dumps.wikimedia.org/wikidatawiki/entities/latest-lexemes.json.bz2"
 RUWIKI_URL = "https://dumps.wikimedia.org/ruwiki/latest/ruwiki-latest-pages-articles.xml.bz2"
 RUSSIAN_LANGUAGE_QID = "Q7737"
@@ -110,6 +104,13 @@ DEFAULT_PROGRESS_TOTALS = {
 _PROGRESS = ProgressTotals(dict(DEFAULT_PROGRESS_TOTALS))
 _PROGRESS_PATH: Path | None = None
 COMMIT_EVERY = 250_000
+# Wiktextract records are intentionally parsed in one streaming pass, but issuing
+# one SQLite statement for every alias/form makes a full Russian dump take hours.
+# The Kaikki writer below batches rows while keeping the same INSERT OR IGNORE
+# semantics.  A bounded flush prevents a large source from growing an unbounded
+# Python set.
+KAIKKI_BATCH_RECORDS = 25_000
+KAIKKI_BATCH_ROWS = 180_000
 
 
 def json_loads_fast(data):
@@ -164,9 +165,11 @@ class BuildTimings:
 
     def run(self, name: str, fn, *args, cached: bool = False, **kwargs):
         t0 = time.perf_counter()
+        print(f"\n[ЭТАП] {name}: запуск", flush=True)
         result = fn(*args, **kwargs)
         elapsed = time.perf_counter() - t0
         self.items.append({"stage": name, "seconds": round(elapsed, 3), "cached": bool(cached)})
+        print(f"[ЭТАП] {name}: завершён за {elapsed:.1f} с", flush=True)
         return result
 
     def mark(self, name: str, seconds: float, *, cached: bool = False) -> None:
@@ -1826,6 +1829,96 @@ def add_sense(conn: sqlite3.Connection, lemma: str, definition: object, source: 
     return conn.total_changes > before
 
 
+class _KaikkiBatch:
+    """Bounded bulk writer for the high-volume Wiktextract pass.
+
+    The source parser still makes all filtering/normalization decisions in the
+    same order as before.  Only the final SQLite writes are grouped into
+    ``executemany`` calls; primary-key/unique constraints remain the authority
+    for de-duplication.
+    """
+
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        casefold_aliases: bool,
+        yo_aliases: bool,
+        accent_aliases: bool,
+    ) -> None:
+        self.conn = conn
+        self.casefold_aliases = casefold_aliases
+        self.yo_aliases = yo_aliases
+        self.accent_aliases = accent_aliases
+        self.links: set[tuple[str, str]] = set()
+        self.senses: list[tuple[str, str, str]] = []
+        self.sense_seen: set[tuple[str, str, str]] = set()
+        self.form_hints: set[tuple[str, str, str]] = set()
+        self.records = 0
+
+    def link(self, key: str, lemma: str) -> None:
+        if not is_lookup_key(key) or not is_lookup_key(lemma):
+            return
+        lemma = normalize_key(lemma)
+        self.links.update(
+            (alias, lemma)
+            for alias in _alias_candidates(
+                key, self.casefold_aliases, self.yo_aliases, self.accent_aliases
+            )
+        )
+
+    def hint(self, key: str, target: str, kind: str) -> None:
+        if not is_lookup_key(key) or not is_lookup_key(target) or not kind:
+            return
+        self.form_hints.add((normalize_key(key), normalize_key(target), kind))
+
+    def sense(self, lemma: str, definition: object, source: str) -> bool:
+        if not is_lookup_key(lemma):
+            return False
+        definition = clean_definition(definition)
+        if not definition:
+            return False
+        row = (normalize_key(lemma), definition, source)
+        if row not in self.sense_seen:
+            self.sense_seen.add(row)
+            self.senses.append(row)
+        # The caller needs to know whether this record carries a lexical sense,
+        # not whether another record happened to insert the same row earlier.
+        return True
+
+    def should_flush(self) -> bool:
+        return (
+            self.records >= KAIKKI_BATCH_RECORDS
+            or len(self.links) + len(self.senses) + len(self.form_hints) >= KAIKKI_BATCH_ROWS
+        )
+
+    def flush(self) -> int:
+        inserted_senses = 0
+        if self.senses:
+            before = self.conn.total_changes
+            self.conn.executemany(
+                "INSERT OR IGNORE INTO senses(lemma, definition, source) VALUES (?, ?, ?)",
+                self.senses,
+            )
+            inserted_senses = self.conn.total_changes - before
+        if self.links:
+            self.conn.executemany(
+                "INSERT OR IGNORE INTO links(key, lemma) VALUES (?, ?)",
+                self.links,
+            )
+        if self.form_hints:
+            self.conn.executemany(
+                "INSERT OR IGNORE INTO form_hints(key, target, kind) VALUES (?, ?, ?)",
+                self.form_hints,
+            )
+        self.links.clear()
+        self.senses.clear()
+        self.sense_seen.clear()
+        self.form_hints.clear()
+        self.records = 0
+        return inserted_senses
+
+
 def target_words(sense: dict) -> list[str]:
     result: list[str] = []
     for field in ("form_of", "alt_of"):
@@ -1862,6 +1955,12 @@ def process_kaikki(
     max_records: int = 0,
 ) -> dict[str, int]:
     processed = accepted = definitions = redirects = form_links = 0
+    batch = _KaikkiBatch(
+        conn,
+        casefold_aliases=casefold_aliases,
+        yo_aliases=yo_aliases,
+        accent_aliases=accent_aliases,
+    )
     lang_alt = b"|".join(re.escape(x.encode("ascii", "ignore")) for x in sorted(langs))
     lang_prefilter = re.compile(rb'"lang_code"\s*:\s*"(?:' + lang_alt + rb')"') if lang_alt else None
     with open_jsonl_binary(path) as f:
@@ -1871,7 +1970,11 @@ def process_kaikki(
                 break
             if processed % 25_000 == 0:
                 progress_render("Wiktionary", processed, progress_expected("wiktionary_records", processed), unit="records")
-            if processed % COMMIT_EVERY == 0:
+            # Flush at a predictable record boundary as well as when the row
+            # bound is reached.  This keeps memory bounded on records with many
+            # inflected forms and avoids a giant transaction on long dumps.
+            if processed % KAIKKI_BATCH_RECORDS == 0:
+                definitions += batch.flush()
                 conn.commit()
             if lang_prefilter is not None and not lang_prefilter.search(line):
                 continue
@@ -1912,36 +2015,26 @@ def process_kaikki(
                     form_kind = textual_form_kind(glosses[-1] if glosses else "") or form_kind
                 if targets:
                     for target in targets:
-                        add_link(
-                            conn, word, target,
-                            casefold_aliases=casefold_aliases,
-                            yo_aliases=yo_aliases,
-                            accent_aliases=accent_aliases,
+                        batch.link(
+                            word, target,
                         )
                         if form_kind:
-                            add_form_hint(conn, word, target, form_kind)
+                            batch.hint(word, target, form_kind)
                             record_form_hints.append((target, form_kind))
                         form_links += 1
                 if sense_is_grammar_only(sense) or textual_target:
                     continue
                 # The leaf gloss is usually the most specific one in Wiktextract.
-                if glosses and add_sense(conn, word, glosses[-1], f"wiktionary:{obj.get('lang_code','')}"):
-                    definitions += 1
+                if glosses and batch.sense(word, glosses[-1], f"wiktionary:{obj.get('lang_code','')}"):
                     has_lexical_sense = True
             if has_lexical_sense:
-                add_link(
-                    conn, word, word,
-                    casefold_aliases=casefold_aliases,
-                    yo_aliases=yo_aliases,
-                    accent_aliases=accent_aliases,
+                batch.link(
+                    word, word,
                 )
             redirect = obj.get("redirect")
             if is_lookup_key(redirect):
-                add_link(
-                    conn, word, redirect,
-                    casefold_aliases=casefold_aliases,
-                    yo_aliases=yo_aliases,
-                    accent_aliases=accent_aliases,
+                batch.link(
+                    word, redirect,
                 )
                 redirects += 1
             if include_forms:
@@ -1954,11 +2047,8 @@ def process_kaikki(
                     else:
                         form = form_obj
                     if is_lookup_key(form):
-                        add_link(
-                            conn, form, word,
-                            casefold_aliases=casefold_aliases,
-                            yo_aliases=yo_aliases,
-                            accent_aliases=accent_aliases,
+                        batch.link(
+                            form, word,
                         )
                         # When an entry is only a passive-participle redirect, carry
                         # that hint to its inflected forms. If the participle has an
@@ -1966,8 +2056,13 @@ def process_kaikki(
                         # forms must keep that real sense instead.
                         if not has_lexical_sense:
                             for hinted_target, hinted_kind in record_form_hints:
-                                add_form_hint(conn, form, hinted_target, hinted_kind)
+                                batch.hint(form, hinted_target, hinted_kind)
                         form_links += 1
+            batch.records += 1
+            if batch.should_flush():
+                definitions += batch.flush()
+    conn.commit()
+    definitions += batch.flush()
     conn.commit()
     _PROGRESS.record("wiktionary_records", processed)
     progress_finish("Wiktionary", processed, processed, unit="records")
@@ -1978,60 +2073,6 @@ def process_kaikki(
         "form_or_alt_links_seen": form_links,
         "redirects_seen": redirects,
     }
-
-
-def process_opencorpora(
-    path: Path,
-    conn: sqlite3.Connection,
-    *,
-    casefold_aliases: bool,
-    yo_aliases: bool,
-    accent_aliases: bool,
-) -> dict[str, int]:
-    count_lemmas = count_forms = 0
-    fh_ctx = open_bz2_binary_fast(path) if str(path).endswith(".bz2") else open(path, "rb")
-    with fh_ctx as fh:
-        for _event, elem in xml_iterparse_end(fh, "lemma"):
-            tag = "lemma"
-            lemma_node = None
-            forms: list[str] = []
-            for child in list(elem):
-                ctag = child.tag.rsplit("}", 1)[-1]
-                if ctag == "l":
-                    lemma_node = child
-                elif ctag == "f":
-                    form = child.attrib.get("t")
-                    if is_lookup_key(form):
-                        forms.append(normalize_key(form))
-            lemma = lemma_node.attrib.get("t") if lemma_node is not None else None
-            if is_lookup_key(lemma):
-                lemma = normalize_key(lemma)
-                add_link(
-                    conn, lemma, lemma,
-                    casefold_aliases=casefold_aliases,
-                    yo_aliases=yo_aliases,
-                    accent_aliases=accent_aliases,
-                )
-                count_lemmas += 1
-                for form in forms:
-                    add_link(
-                        conn, form, lemma,
-                        casefold_aliases=casefold_aliases,
-                        yo_aliases=yo_aliases,
-                        accent_aliases=accent_aliases,
-                    )
-                    count_forms += 1
-            if count_lemmas and count_lemmas % 25_000 == 0:
-                progress_render("OpenCorpora", count_lemmas, progress_expected("opencorpora_lemmas", count_lemmas), unit="lemmas")
-            if count_lemmas and count_lemmas % COMMIT_EVERY == 0:
-                conn.commit()
-            elem.clear()
-    conn.commit()
-    _PROGRESS.record("opencorpora_lemmas", count_lemmas)
-    if count_lemmas:
-        progress_finish("OpenCorpora", count_lemmas, count_lemmas, unit="lemmas")
-    return {"lemmas_seen": count_lemmas, "forms_seen": count_forms}
-
 
 
 # Wikipedia is used only as a last-resort terminology layer.  The category filter
@@ -4592,8 +4633,6 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser(description="Build RU Max Clean StarDict for KOReader (definitions only).")
     p.add_argument("--kaikki", help="Path to ruwiktionary raw-wiktextract-data.jsonl.gz")
     p.add_argument("--download-kaikki", action="store_true", help="Check/download current Kaikki Russian Wiktionary extract")
-    p.add_argument("--opencorpora", help="Path to dict.opcorpora.xml.bz2")
-    p.add_argument("--download-opencorpora", action="store_true", help="Check/download OpenCorpora morphology")
     p.add_argument("--dal", help="Path to Dal StarDict archive/directory")
     p.add_argument("--download-dal", action="store_true", help="Check/download Dal StarDict fallback layer")
     p.add_argument("--dal-merge", action="store_true", help="Also append Dal meanings to words already defined by better-priority sources")
@@ -4656,7 +4695,6 @@ def _source_info(cache_dir: Path, out_dir: Path, result: dict[str, object]) -> N
         "Wikidata Lexemes: structured lexicographical data under CC0.\n"
         "Russian Wikipedia fallback leads: text under CC BY-SA; used only when enabled and no higher-priority definition exists.\n"
         "V. I. Dal StarDict layer: historical fallback source.\n"
-        "OpenCorpora: morphology only; never displayed as a definition.\n\n"
         "Source/version metadata for this particular build is stored in BUILD_INFO.json.\n"
         "No source labels are inserted into dictionary popup definitions.\n"
     )
@@ -4666,8 +4704,6 @@ def _source_info(cache_dir: Path, out_dir: Path, result: dict[str, object]) -> N
 def _source_stats_report(source_stats: dict[str, object]) -> None:
     stats = source_stats.get("wiktionary")
     if isinstance(stats, dict): report.source_wiktionary(stats)
-    stats = source_stats.get("opencorpora")
-    if isinstance(stats, dict): report.source_opencorpora(stats)
     stats = source_stats.get("wikidata_lexemes")
     if isinstance(stats, dict): report.source_wikidata(stats)
     stats = source_stats.get("dal")
@@ -4741,17 +4777,6 @@ def main(argv=None) -> int:
     if kaikki is None or not kaikki.exists():
         raise SystemExit("Kaikki input missing. Use --kaikki FILE or --download-kaikki.")
     timings.mark("Проверка/получение Wiktionary", time.perf_counter() - kaikkki_t0)
-
-    opencorpora = Path(args.opencorpora) if args.opencorpora else None
-    if args.download_opencorpora:
-        t0 = time.perf_counter()
-        opencorpora = cache.ensure(
-            "OpenCorpora morphology", OPENCORPORA_URLS,
-            opencorpora or (cache_dir / "dict.opcorpora.xml.bz2"), required=False,
-        )
-        timings.mark("Проверка/получение OpenCorpora", time.perf_counter() - t0)
-        if opencorpora is None:
-            log("WARNING: Continuing without OpenCorpora morphology; Wiktionary/Wikidata forms remain enabled.")
 
     wikidata_lexemes = Path(args.wikidata_lexemes) if args.wikidata_lexemes else None
     if args.download_wikidata_lexemes:
@@ -4833,7 +4858,6 @@ def main(argv=None) -> int:
         "rules": LEXICAL_STAGE_RULES,
         "flags": stage_flags,
         "kaikki": _stage_source_payload(kaikki),
-        "opencorpora": _stage_source_payload(opencorpora),
         "wikidata": _stage_source_payload(wikidata_lexemes),
         "dal": _stage_source_payload(dal),
         "legacy": [_stage_source_payload(p) for p in legacy_paths],
@@ -4976,11 +5000,6 @@ def main(argv=None) -> int:
         )
         source_stats["wiktionary"] = stats
         report.source_wiktionary(stats)
-
-        if opencorpora and opencorpora.exists():
-            stats = timings.run("OpenCorpora", process_opencorpora, opencorpora, conn, **flags)
-            source_stats["opencorpora"] = stats
-            report.source_opencorpora(stats)
 
         if wikidata_lexemes and wikidata_lexemes.exists():
             stats = timings.run(

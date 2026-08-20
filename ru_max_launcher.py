@@ -99,10 +99,14 @@ def run_stream(cmd: list[str], *, log_path: Path | None = None, title: str = "")
     def _reader() -> None:
         try:
             while True:
-                ch = p.stdout.read(1)
-                if ch == "":
+                # TextIOWrapper.read(size) waits for the full size on Windows,
+                # which would hide the heartbeat while a child is quiet. Keep a
+                # one-character read here; the launcher still processes queued
+                # chunks when an alternate pipe reader supplies them.
+                chunk = p.stdout.read(1)
+                if chunk == "":
                     break
-                chunks.put(ch)
+                chunks.put(chunk)
         finally:
             chunks.put(None)
 
@@ -111,38 +115,71 @@ def run_stream(cmd: list[str], *, log_path: Path | None = None, title: str = "")
     progress_mode = False
     last_output = time.monotonic()
     heartbeat = 15.0
+    live_width = 0
+    heartbeat_line = False
+
+    def clear_live_line() -> None:
+        nonlocal live_width, heartbeat_line
+        if live_width:
+            sys.stdout.write("\r" + (" " * live_width) + "\r")
+            sys.stdout.flush()
+        live_width = 0
+        heartbeat_line = False
+
+    def write_live_line(text: str) -> None:
+        nonlocal live_width
+        # Carriage-return output is used by progress_ui.  Padding clears a
+        # longer previous line on plain Windows cmd.exe without relying on ANSI
+        # escape support, so heartbeat text never accumulates as fake log lines.
+        width = len(text)
+        padding = " " * max(0, live_width - width)
+        sys.stdout.write("\r" + text + padding)
+        sys.stdout.flush()
+        live_width = max(width, live_width)
+
     while True:
         try:
-            ch = chunks.get(timeout=heartbeat)
+            chunk = chunks.get(timeout=heartbeat)
         except queue.Empty:
             elapsed = int(time.monotonic() - last_output)
-            print(f"\n[ОЖИДАНИЕ] {title or 'операция'} выполняется ({elapsed} с без нового вывода)...", flush=True)
+            write_live_line(
+                f"[ОЖИДАНИЕ] {title or 'операция'} выполняется "
+                f"({elapsed} с без нового вывода)..."
+            )
+            heartbeat_line = True
             continue
-        if ch is None:
+        if chunk is None:
             break
-        last_output = time.monotonic()
-        if ch == "\r":
-            if buf:
-                sys.stdout.write("\r" + buf)
-                sys.stdout.flush()
-            buf = ""
-            progress_mode = True
-        elif ch == "\n":
-            if progress_mode:
+        for ch in chunk:
+            last_output = time.monotonic()
+            if ch == "\r":
+                if heartbeat_line:
+                    clear_live_line()
                 if buf:
-                    sys.stdout.write("\r" + buf)
-                sys.stdout.write("\n")
-                sys.stdout.flush()
+                    write_live_line(buf)
                 buf = ""
-                progress_mode = False
+                progress_mode = True
+            elif ch == "\n":
+                if progress_mode:
+                    if buf:
+                        write_live_line(buf)
+                    elif heartbeat_line:
+                        clear_live_line()
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+                    buf = ""
+                    progress_mode = False
+                else:
+                    clear_live_line()
+                    print(buf, flush=True)
+                    if log:
+                        log.write(buf + "\n")
+                        log.flush()
+                    buf = ""
             else:
-                print(buf, flush=True)
-                if log:
-                    log.write(buf + "\n")
-                    log.flush()
-                buf = ""
-        else:
-            buf += ch
+                buf += ch
+    if heartbeat_line:
+        clear_live_line()
     if buf:
         print(buf)
         if log and not progress_mode:
@@ -345,7 +382,7 @@ def build(
         # Online builds already performed the update pass above. Reuse that exact
         # cache snapshot without issuing the same HEAD requests a second time.
         args += ["--offline"]
-        args += ["--download-kaikki", "--download-opencorpora", "--download-wikidata-lexemes", "--download-dal"]
+        args += ["--download-kaikki", "--download-wikidata-lexemes", "--download-dal"]
         if profile == "max":
             args += ["--download-wikipedia", "--wikipedia-quality-upgrade"]
     # Offline mode naturally uses the same cache-only path; artifact-only quick
@@ -446,4 +483,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

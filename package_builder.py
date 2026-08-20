@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Create a deterministic builder-only ZIP for a public GitHub release.
 
-The repository intentionally contains source fixtures and reader-pack inputs,
-but never ships generated dictionaries, books, caches, or downloaded dumps.
+The repository intentionally contains source fixtures and reader-pack inputs.
+Releases ship the small original dictionary test book, but never ship generated
+dictionaries, user books, caches, or downloaded dumps.
 """
 from __future__ import annotations
 
@@ -46,18 +47,26 @@ EXCLUDED_FILES = {
     "test_reader_layers.py",
     "BOOK_COVERAGE_NEW.json",
     "BOOK_COVERAGE_WITH_LAYERS.json",
+    "test_books/make_dictionary_test_book.py",
+}
+TEST_BOOK_FILES = {
+    "test_books/RU-Max-Clean-Dictionary-Test-Book.epub",
+    "test_books/RU-Max-Clean-Dictionary-Test-Book.fb2",
+    "test_books/README_RU.txt",
 }
 ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
 
 
 def _excluded(path: Path) -> bool:
+    if path.as_posix() in TEST_BOOK_FILES:
+        return False
     if path.is_symlink():
         return True
     if any(part in EXCLUDED_DIRS for part in path.parts):
         return True
     if path.name.startswith(EXCLUDED_PREFIXES):
         return True
-    if path.name in EXCLUDED_FILES:
+    if path.name in EXCLUDED_FILES or path.as_posix() in EXCLUDED_FILES:
         return True
     return path.suffix.lower() in EXCLUDED_SUFFIXES
 

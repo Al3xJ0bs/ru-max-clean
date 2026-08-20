@@ -34,6 +34,10 @@ RETRYABLE_HTTP = frozenset({408, 425, 429, 500, 502, 503, 504})
 DOWNLOAD_WORKERS_DEFAULT = 2
 DOWNLOAD_WORKERS_MAX = 4
 RANGE_RETRY_WAVES = 5
+# After the burst has been reduced to one connection, allow a few serialized
+# recovery waves with the normal Retry-After-aware request retry. Successful
+# ranges stay on disk and are never downloaded again.
+RANGE_SERIAL_RECOVERY_WAVES = RANGE_RETRY_WAVES + 3
 
 # Wikimedia and Kaikki are happy with a sustained stream but may reject a burst
 # of byte-range requests with HTTP 429.  Keep a tiny per-host request gate so a
@@ -256,7 +260,15 @@ def _download_parallel_ranges(url: str, destination: Path, label: str, total: in
         # Let the range-wave scheduler see 429 immediately.  Retrying it inside
         # every range worker would keep the original burst alive for several
         # seconds and defeat adaptive downshifting.
-        with _open_with_retry(req, timeout=timeout, retry_rate_limit=False) as response, part.open("wb") as out:
+        # During the initial waves, let the scheduler observe 429 immediately
+        # and reduce concurrency.  In serialized recovery mode the normal
+        # Retry-After-aware retry is preferable and still affects only this
+        # failed range.
+        with _open_with_retry(
+            req,
+            timeout=timeout,
+            retry_rate_limit=wave > RANGE_RETRY_WAVES,
+        ) as response, part.open("wb") as out:
             if getattr(response, "status", 200) != 206 or not response.headers.get("Content-Range"):
                 raise OSError("server does not support HTTP range downloads")
             content_range = str(response.headers.get("Content-Range") or "")
@@ -309,7 +321,7 @@ def _download_parallel_ranges(url: str, destination: Path, label: str, total: in
             if len(rate_limited) != len(failures):
                 raise failures[0][1]
             wave += 1
-            if wave > RANGE_RETRY_WAVES:
+            if wave > RANGE_SERIAL_RECOVERY_WAVES:
                 raise failures[0][1]
             active_workers = max(1, active_workers // 2)
             delay = max(_retry_delay(exc, wave) for exc in rate_limited)

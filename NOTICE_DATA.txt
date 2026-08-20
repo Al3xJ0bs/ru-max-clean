@@ -21,15 +21,11 @@ Main online sources used by MAX mode:
    generated dictionary containing this text must preserve required attribution
    and share-alike conditions.
 
-4. OpenCorpora morphology
-   https://opencorpora.org/
-   Used for lookup-form links only, never as displayed definition prose.
-
-5. V. I. Dal StarDict archive
+4. V. I. Dal StarDict archive
    Download mirrors are listed in build_ru_max_clean.py. It is used as a
    historical fallback layer.
 
-6. Optional reader layers
+5. Optional reader layers
    latin_wiktionary.tsv and literary_wiktionary.tsv are conservative extracts
    from the local Russian Wiktionary/Kaikki dump and retain Russian glosses
    only. The curated seed TSV files are maintained with this project. The

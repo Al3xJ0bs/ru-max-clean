@@ -24,6 +24,8 @@ __pycache__/
 # Local corpus material and reports
 *.fb2
 *.epub
+!test_books/RU-Max-Clean-Dictionary-Test-Book.fb2
+!test_books/RU-Max-Clean-Dictionary-Test-Book.epub
 BOOK_COVERAGE*.json
 QUALITY_REPORT.json
 QUALITY_REVIEW.tsv

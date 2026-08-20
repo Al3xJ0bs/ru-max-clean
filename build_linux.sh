@@ -4,7 +4,6 @@ cd "$(dirname "$0")"
 PYTHON=${PYTHON:-python3}
 "$PYTHON" build_ru_max_clean.py \
   --download-kaikki \
-  --download-opencorpora \
   --download-wikidata-lexemes \
   --download-dal \
   --download-wikipedia \

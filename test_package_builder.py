@@ -25,12 +25,17 @@ def main() -> None:
         (root / "RU-Max-Clean-4.9.1-PRODUCTION").mkdir()
         (root / "RU-Max-Clean-4.9.1-PRODUCTION" / "ru-max-clean.dict").write_bytes(b"not shipped")
         (root / "book.epub").write_bytes(b"not shipped")
+        (root / "test_books").mkdir()
+        (root / "test_books" / "RU-Max-Clean-Dictionary-Test-Book.epub").write_bytes(b"test book")
+        (root / "test_books" / "RU-Max-Clean-Dictionary-Test-Book.fb2").write_bytes(b"test book")
+        (root / "test_books" / "README_RU.txt").write_text("test book readme\n", encoding="utf-8")
+        (root / "test_books" / "make_dictionary_test_book.py").write_text("print('internal generator')\n", encoding="utf-8")
 
         first = root / "dist" / "builder.zip"
         second = root / "dist" / "builder-again.zip"
         result = build_package(root, first, "1.0")
         build_package(root, second, "1.0")
-        assert result["file_count"] == 3
+        assert result["file_count"] == 6
         assert hashlib.sha256(first.read_bytes()).digest() == hashlib.sha256(second.read_bytes()).digest()
 
         with zipfile.ZipFile(first) as archive:
@@ -38,12 +43,17 @@ def main() -> None:
             assert "BUILD_MANIFEST.json" in names
             assert "build_ru_max_clean.py" in names
             assert "reader_packs/phraseology.tsv" in names
+            assert "test_books/RU-Max-Clean-Dictionary-Test-Book.epub" in names
+            assert "test_books/RU-Max-Clean-Dictionary-Test-Book.fb2" in names
+            assert "test_books/README_RU.txt" in names
+            assert "test_books/make_dictionary_test_book.py" not in names
             assert "scan_book_coverage.py" not in names
             assert "reader_layers.py" not in names
             assert "internal_book_coverage.py" not in names
             assert "test_reader_layers.py" not in names
             assert "BOOK_COVERAGE_NEW.json" not in names
-            assert not any(name.endswith((".dict", ".epub")) for name in names)
+            assert "book.epub" not in names
+            assert not any(name.endswith(".dict") for name in names)
             manifest = json.loads(archive.read("BUILD_MANIFEST.json"))
             assert manifest["package_kind"] == "builder-only"
             assert manifest["public_version"] == "1.0"
@@ -54,4 +64,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

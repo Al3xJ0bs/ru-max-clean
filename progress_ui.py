@@ -9,6 +9,7 @@ from dataclasses import dataclass
 _BAR = 28
 _last_emit: dict[str, float] = {}
 _state: dict[str, tuple[float, float]] = {}  # label -> (start_time, start_value)
+_last_value: dict[str, tuple[float, float | None, str]] = {}
 
 
 def _enabled() -> bool:
@@ -47,6 +48,7 @@ def render(label: str, current: int | float, total: int | float | None = None, *
     if not force and now - last < 0.12:
         return
     _last_emit[label] = now
+    _last_value[label] = (float(current), float(total) if total is not None else None, unit)
     if label not in _state:
         _state[label] = (now, float(current))
     start_t, start_v = _state[label]
@@ -77,11 +79,16 @@ def render(label: str, current: int | float, total: int | float | None = None, *
 def finish(label: str, current: int | float, total: int | float | None = None, *, unit: str = "") -> None:
     if not _enabled():
         return
-    render(label, current, total or current, unit=unit, force=True)
+    final_total = total or current
+    previous = _last_value.get(label)
+    final_state = (float(current), float(final_total) if final_total is not None else None, unit)
+    if previous != final_state:
+        render(label, current, final_total, unit=unit, force=True)
     sys.stderr.write("\n")
     sys.stderr.flush()
     _last_emit.pop(label, None)
     _state.pop(label, None)
+    _last_value.pop(label, None)
 
 
 @dataclass

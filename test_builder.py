@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import shutil
+import json
 import sqlite3
 import struct
 import subprocess
@@ -82,7 +83,6 @@ def main():
     subprocess.run([
         sys.executable, str(ROOT / "build_ru_max_clean.py"),
         "--kaikki", str(ROOT / "sample_raw.jsonl.gz"),
-        "--opencorpora", str(ROOT / "sample_opencorpora.xml.bz2"),
         "--wikidata-lexemes", str(ROOT / "sample_wikidata_lexemes.json.bz2"),
         "--dal", str(LEGACY),
         "--wikipedia", str(ROOT / "sample_ruwiki.xml.bz2"),
@@ -92,6 +92,9 @@ def main():
         "--output-dir", str(OUT),
     ], check=True)
     base = OUT / "ru-max-clean"
+    stats_payload = json.loads((OUT / "BUILD_STATS.json").read_text(encoding="utf-8"))
+    assert "opencorpora" not in json.dumps(stats_payload, ensure_ascii=False).casefold()
+    assert "opencorpora" not in (OUT / "SOURCES.txt").read_text(encoding="utf-8").casefold()
     subprocess.run([sys.executable, str(ROOT / "validate_stardict.py"), str(base)], check=True)
 
     k = lookup(base, "ключ")
@@ -597,4 +600,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

@@ -15,7 +15,7 @@ records = [
      "forms":[{"form":"ключами","tags":["ins","pl"]}]},
     {"word":"полупроводниковый","lang":"Русский","lang_code":"ru","pos":"adj","senses":[
         {"glosses":["Относящийся к полупроводникам или основанный на их свойствах."]}],
-     "forms":[{"form":"полупроводниковыми","tags":["ins","pl"]}]},
+     "forms":[{"form":"полупроводниковому","tags":["dat","sg"]},{"form":"полупроводниковыми","tags":["ins","pl"]}]},
     {"word":"сталь","lang":"Русский","lang_code":"ru","pos":"noun","senses":[
         {"glosses":["Сплав железа с углеродом и другими элементами, обладающий высокой прочностью."]}],
      "forms":[{"form":"стали","tags":["gen","sg"]}]},
@@ -60,16 +60,6 @@ raw_jsonl = "".join(json.dumps(obj, ensure_ascii=False) + "\n" for obj in record
 # gzip.open() call embedded the current wall-clock time in the header, making a
 # clean checkout appear dirty after every demo build.
 (ROOT / "sample_raw.jsonl.gz").write_bytes(gzip.compress(raw_jsonl, mtime=0))
-
-xml = '''<?xml version="1.0" encoding="utf-8"?>
-<dictionary>
-  <lemmata>
-    <lemma id="1"><l t="полупроводниковый"/><f t="полупроводниковому"/><f t="полупроводниковыми"/></lemma>
-    <lemma id="2"><l t="сталь"/><f t="стали"/></lemma>
-    <lemma id="3"><l t="стать"/><f t="стали"/></lemma>
-  </lemmata>
-</dictionary>'''.encode("utf-8")
-(ROOT / "sample_opencorpora.xml.bz2").write_bytes(bz2.compress(xml))
 
 lexemes = [
     {
