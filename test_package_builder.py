@@ -15,6 +15,7 @@ def main() -> None:
         root = Path(td)
         (root / "VERSION.txt").write_text("4.9.1 TURBO\n", encoding="utf-8")
         (root / "build_ru_max_clean.py").write_text("print('builder')\n", encoding="utf-8")
+        (root / "dictionary_layout.py").write_text("ROOT = 'RU-Dictionaries'\n", encoding="utf-8")
         (root / "reader_packs").mkdir()
         (root / "reader_packs" / "phraseology.tsv").write_text("a\tb\n", encoding="utf-8")
         (root / "scan_book_coverage.py").write_text("print('internal')\n", encoding="utf-8")
@@ -42,13 +43,14 @@ def main() -> None:
         second = root / "dist" / "builder-again.zip"
         result = build_package(root, first, "1.0")
         build_package(root, second, "1.0")
-        assert result["file_count"] == 6
+        assert result["file_count"] == 7
         assert hashlib.sha256(first.read_bytes()).digest() == hashlib.sha256(second.read_bytes()).digest()
 
         with zipfile.ZipFile(first) as archive:
             names = archive.namelist()
             assert "BUILD_MANIFEST.json" in names
             assert "build_ru_max_clean.py" in names
+            assert "dictionary_layout.py" in names
             assert "reader_packs/phraseology.tsv" in names
             assert "test_books/RU-Max-Clean-Dictionary-Test-Book.epub" in names
             assert "test_books/RU-Max-Clean-Dictionary-Test-Book.fb2" in names
