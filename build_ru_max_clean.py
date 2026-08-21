@@ -37,8 +37,10 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Iterable
 
-# Optional native accelerators. bootstrap.py installs these automatically on Windows,
-# but the builder retains stdlib fallbacks so an offline machine is never blocked.
+# Optional native accelerators. The bootstrapper reports what is available, while
+# the builder retains stdlib fallbacks so an offline machine is never blocked.
+# rapidgzip is an explicit opt-in because some Windows wheels regress on large
+# readline streams.
 try:
     import orjson as _orjson  # type: ignore
 except Exception:
@@ -72,6 +74,9 @@ QUALITY_STAGE_RULES = "semantic-clean-v10"
 FORM_STAGE_RULES = "form-v1"
 EXPORT_STAGE_RULES = "stardict-export-v2"
 QUALITY_AUDIT_RULES = "quality-audit-v11"
+# Reporting-only calibration.  This is intentionally not part of the raw
+# rescue/semantic score; changing it must not alter text or source selection.
+QUALITY_REPORT_SCORE_RULES = "report-confidence-v1"
 
 
 def _builder_code_sha256() -> str:
@@ -119,9 +124,21 @@ def json_loads_fast(data):
     return json.loads(data)
 
 
+def _rapidgzip_enabled() -> bool:
+    """Return whether the optional rapidgzip reader was explicitly enabled.
+
+    Some Windows wheels of rapidgzip have very poor ``readline`` throughput on
+    large Wiktextract streams despite reporting successful parallel setup.  The
+    reliable stdlib gzip reader is therefore the default; power users can opt in
+    with ``RU_MAX_ENABLE_RAPIDGZIP=1`` after validating their local wheel.
+    """
+    flag = os.environ.get("RU_MAX_ENABLE_RAPIDGZIP", "").strip().casefold()
+    return _rapidgzip is not None and flag in {"1", "true", "yes", "on"}
+
+
 def open_gzip_binary_fast(path: Path):
-    """Open gzip with parallel decoding when rapidgzip is available."""
-    if _rapidgzip is not None and str(path).endswith(".gz"):
+    """Open gzip with the reliable reader; rapidgzip is an explicit opt-in."""
+    if _rapidgzip_enabled() and str(path).endswith(".gz"):
         try:
             return _rapidgzip.open(str(path), parallelization=max(1, os.cpu_count() or 1))
         except Exception:
@@ -211,10 +228,11 @@ def accelerator_info() -> dict[str, object]:
         "orjson": bool(_orjson is not None),
         "lxml": bool(_lxml_etree is not None),
         "indexed_bzip2": bool(_indexed_bzip2 is not None),
-        "rapidgzip": bool(_rapidgzip is not None),
+        "rapidgzip_installed": bool(_rapidgzip is not None),
+        "rapidgzip": _rapidgzip_enabled(),
         **sqlite_tuning(),
     }
-    info["gzip_threads"] = max(1, min(32, os.cpu_count() or 1)) if _rapidgzip is not None else 1
+    info["gzip_threads"] = max(1, min(32, os.cpu_count() or 1)) if _rapidgzip_enabled() else 1
     info["bzip2_threads"] = max(2, min(32, os.cpu_count() or 2)) if _indexed_bzip2 is not None else 1
     return info
 
@@ -385,8 +403,7 @@ def textual_form_target(value: object) -> str | None:
     for rx in TEXTUAL_FORM_OF_RES:
         m = rx.match(text)
         if m:
-            target = normalize_key(m.group("target"))
-            return target if is_lookup_key(target) else None
+            return _normalized_lookup_key(m.group("target"))
     return None
 
 
@@ -458,17 +475,25 @@ def normalize_key(value: str) -> str:
 
 
 def is_lookup_key(value: object) -> bool:
+    return _normalized_lookup_key(value) is not None
+
+
+def _normalized_lookup_key(value: object) -> str | None:
+    """Normalize and validate a lookup key in one pass for hot source loops."""
     if not isinstance(value, str):
-        return False
+        return None
     value = normalize_key(value)
     if not value or len(value) > 220 or "\x00" in value or "\n" in value or "\r" in value:
-        return False
+        return None
     # Entries written with an edge hyphen are affixes/morphemes (e.g. "-у",
     # "без-") rather than standalone words.  Internal hyphens remain valid,
     # so technical terms such as "PID-регулятор" are unaffected.
     if value.startswith("-") or value.endswith("-"):
-        return False
-    return bool(LETTER_RE.search(value))
+        return None
+    return value if LETTER_RE.search(value) else None
+
+
+STRESS_MARKS = frozenset({"\u0300", "\u0301", "\u0340", "\u0341"})
 
 
 def strip_combining_alias(value: str) -> str | None:
@@ -476,8 +501,7 @@ def strip_combining_alias(value: str) -> str | None:
     # Remove lexical stress marks, but preserve phonemic combining marks such
     # as Cyrillic breve in ``й`` (NFD: ``и`` + U+0306).  Removing every Mn
     # character silently turned ``руко́й`` into the incorrect alias ``рукои``.
-    stress_marks = {"\u0300", "\u0301", "\u0340", "\u0341"}
-    stripped = "".join(ch for ch in decomposed if ch not in stress_marks)
+    stripped = "".join(ch for ch in decomposed if ch not in STRESS_MARKS)
     stripped = unicodedata.normalize("NFC", stripped)
     return stripped if stripped != value else None
 
@@ -606,6 +630,16 @@ ABOUT_NOMINAL_HEADS = {
 ABOUT_NOMINAL_RE = re.compile(
     r"^(?:о|об|обо)\s+(?P<head>[А-Яа-яЁё-]+)(?P<rest>(?:\s|[,;:—–-]).*)?$", re.IGNORECASE
 )
+# Function words in short ``О ...`` glosses are preserved while lexical tokens
+# are resolved through the existing morphology/alias graph.  This deliberately
+# excludes conjunctions and clause markers so a prose sentence is never
+# rewritten as a guessed nominative phrase.
+ABOUT_REWRITE_STOPWORDS = frozenset({
+    "в", "во", "на", "над", "под", "к", "ко", "с", "со", "у", "от", "до",
+    "из", "за", "по", "о", "об", "обо", "при", "без", "для", "про", "и", "или",
+    "а", "но", "как", "так", "не", "ни", "же", "ли", "либо", "после", "перед",
+    "между", "через", "ради", "около", "вокруг", "среди", "против", "вместо",
+})
 # Common parenthetical selectional restrictions that can be integrated without
 # losing syntax: "(о растворителе) молекулы которого ..." ->
 # "Растворитель, молекулы которого ...".
@@ -722,10 +756,17 @@ LEADING_HISTORICAL_RANGE_RE = re.compile(
 )
 # A year should look like prose, not a protocol/model token such as IMT-2020.
 HUMAN_YEAR_RE = re.compile(
-    r"(?<![A-Za-zА-Яа-яЁё0-9/_-])(?:1[5-9]\d{2}|20\d{2})(?![A-Za-zА-Яа-яЁё0-9/_-])"
+    # A trailing ``+`` is a version/range marker (for example ECMAScript
+    # 2015+), not a historical date.  Keep it out of the encyclopedic-date
+    # warning while retaining ordinary prose years.
+    r"(?<![A-Za-zА-Яа-яЁё0-9/_-])(?:1[5-9]\d{2}|20\d{2})(?![A-Za-zА-Яа-яЁё0-9/_+-])"
 )
 WIKI_DANGLING_TAIL_RE = re.compile(
     r"(?:\(\s*см\.?|\bсм\.|\bсокр\.|\bг\.|\bиз|\bкомпанией|\bкорпорацией|\bфирмой)\s*$",
+    re.IGNORECASE,
+)
+WIKI_EMPTY_ABBREV_PAREN_RE = re.compile(
+    r"\s*\(\s*(?:сокр(?:ащение)?\.?|аббр(?:евиатура)?\.?)\s+от\s*\)\s*",
     re.IGNORECASE,
 )
 WIKI_STRAY_MEDIA_TAIL_RE = re.compile(
@@ -758,6 +799,34 @@ WIKI_HISTORY_INLINE_RE = re.compile(
     r"принят|запущенн|установленн)\w*\b",
     re.IGNORECASE,
 )
+# Wikipedia extraction can leave a completed lead followed by a detached date,
+# e.g. ``... в 1602 году. , 1622 год``.  This deliberately accepts only a
+# standalone human date after terminal punctuation; ordinary dates inside a
+# sentence are not candidates for removal.
+WIKI_ORPHAN_DATE_TAIL_RE = re.compile(
+    r"^(?P<core>.+?[.!?])\s*[,;:—–-]\s*"
+    r"(?P<date>(?:1[5-9]\d{2}|20\d{2})\s*(?:г(?:г)?\.?|год(?:а|у|ом|ы)?))"
+    r"\s*[.,;:)]*\s*$",
+    re.IGNORECASE,
+)
+# A second, lower-case fragment after a finished sentence is another common
+# Wikipedia lead-tail artefact.  Keep the trigger list intentionally short and
+# require a trailing historical year so legitimate parenthetical prose stays
+# untouched.
+WIKI_ORPHAN_HISTORY_TAIL_RE = re.compile(
+    r"^(?P<core>.+?[.!?])\s*[,;:—–-]\s*"
+    r"(?P<tail>(?:историческ\w*|впоследстви\w*|позднее|ныне|сейчас|"
+    r"в\s+настоящее\s+время)\b[^.!?]{0,220}"
+    r"(?:1[5-9]\d{2}|20\d{2})\s*(?:г(?:г)?\.?|год(?:а|у|ом|ы)?)"
+    r"\s*[.!?])$",
+    re.IGNORECASE,
+)
+WIKI_DATE_SPACE_PUNCT_RE = re.compile(
+    r"(?P<date>(?:1[5-9]\d{2}|20\d{2})\s*(?:г(?:г)?\.?|год(?:а|у|ом|ы)?))"
+    r"\s+(?P<punct>[.,;:])",
+    re.IGNORECASE,
+)
+WIKI_MALFORMED_SELF_REFERENCE_RE = re.compile(r"^\s*\(\s*[,;:]", re.IGNORECASE)
 GENERIC_WIKI_CORES = {
     "автомобиль", "компьютер", "программа", "проект", "сервис", "сайт", "веб-сайт",
     "компания", "организация", "спутник", "устройство", "система", "приложение",
@@ -1254,6 +1323,69 @@ def definition_quality_flags(lemma: str, definition: str, source: str = "") -> l
     return flags
 
 
+def _cleanup_malformed_wikipedia_warning(
+    lemma: str, definition: str, source: str,
+) -> tuple[str, set[str]]:
+    """Clean only unambiguous Wikipedia lead-tail extraction artefacts.
+
+    This helper is intentionally source-aware and warning-driven.  In
+    particular, it never rewrites Wiktionary ``about`` fragments or arbitrary
+    parentheticals: those are handled by their existing source-specific rules.
+    A detached date/history fragment is removed only when it follows a
+    completed sentence, and a self-reference is rejected only when the
+    headword is immediately followed by malformed punctuation inside a
+    parenthesis (``Headword (, ...``).
+    """
+    if not source.startswith("ruwiki"):
+        return definition, set()
+    text = _compact_quality_text(definition)
+    if not text:
+        return text, set()
+
+    flags = set(definition_quality_flags(lemma, text, source))
+    changes: set[str] = set()
+
+    # An orphan date/history tail is safe to remove only when the lead already
+    # ends a sentence and the tail is a narrowly recognized historical token.
+    # Requiring the corresponding date warning prevents this from touching
+    # ordinary punctuation in a clean encyclopedic sentence.
+    orphan_date = WIKI_ORPHAN_DATE_TAIL_RE.fullmatch(text)
+    orphan_history = WIKI_ORPHAN_HISTORY_TAIL_RE.fullmatch(text)
+    if flags & {"encyclopedic_date", "early_self_reference", "broken_fragment"} or orphan_history:
+        match = orphan_date
+        if match is None:
+            match = orphan_history
+        if match is not None:
+            core = _compact_quality_text(match.group("core")).rstrip(" ,;:—–-")
+            if len(core) >= 8 and len(core.split()) >= 2:
+                text = core.rstrip(".!?") + "."
+                changes.add("wikipedia_orphan_date_tail_removed")
+
+        # Fix a space before punctuation only on a row already carrying a
+        # historical/self-reference warning.  This is punctuation repair, not
+        # a broad prose rewrite.
+        newer = WIKI_DATE_SPACE_PUNCT_RE.sub(
+            lambda m: f"{m.group('date')}{m.group('punct')}", text
+        )
+        if newer != text:
+            text = newer
+            changes.add("wikipedia_date_punctuation_fixed")
+
+    # Exact-title self-reference followed by ``(,``/``(;``/``(:`` is a broken
+    # template expansion, not a legitimate parenthetical definition.  The
+    # punctuation signature is deliberately stricter than a normal headword
+    # prefix check, preserving rows such as ``GiNaC является ...``.
+    head = normalize_key(lemma).casefold().strip(" .,:;—–-")
+    low = text.casefold()
+    if head and low.startswith(head):
+        suffix = text[len(head):]
+        if WIKI_MALFORMED_SELF_REFERENCE_RE.match(suffix):
+            changes.add("wikipedia_self_reference_removed")
+            return "", changes
+
+    return text, changes
+
+
 def definition_quality_score(
     lemma: str,
     definition: str,
@@ -1307,6 +1439,50 @@ def definition_quality_score(
     if n >= 55 and any(ch in text for ch in (";", ",", "—")):
         score += 2
     return max(0, min(100, score))
+
+
+def definition_quality_report_score(
+    lemma: str,
+    definition: str,
+    source: str = "",
+    _flags: list[str] | None = None,
+    _normalized_text: str | None = None,
+    _raw_score: int | None = None,
+) -> int:
+    """Calibrate the *report-only* score without changing semantic decisions.
+
+    ``definition_quality_score`` remains the conservative raw heuristic used by
+    source selection and Wikipedia rescue.  It intentionally starts ordinary
+    prose at 72, which is useful for comparing candidates but makes the global
+    report look as if every clean entry were mediocre.  The report score is a
+    confidence scale: a non-empty definition with no actionable warning is a
+    complete QA success (100), while the two explicitly informational classes
+    receive a small, honest deduction for being intentionally terse.  Any
+    actionable warning preserves the raw score, so calibration cannot hide a
+    problem or remove a row from QUALITY_REVIEW.
+    """
+    text = _normalized_text if _normalized_text is not None else _compact_quality_text(definition)
+    if not text:
+        return 0
+    flags = set(_flags if _flags is not None else definition_quality_flags(lemma, text, source))
+    raw_score = _raw_score if _raw_score is not None else definition_quality_score(
+        lemma, text, source, flags, _normalized_text=text
+    )
+    informational = {"onomastic_stub", "concise_gloss"}
+    actionable = flags - informational
+    if actionable:
+        return max(0, min(100, int(raw_score)))
+    # A few malformed tails can still evade a conservative detector.  Never
+    # turn an unflagged, very-low raw score into a perfect report score: it
+    # remains visible for later detector/fixture work instead of being hidden
+    # by calibration.
+    if not flags and raw_score < 60:
+        return max(0, min(100, int(raw_score)))
+    if "onomastic_stub" in flags:
+        return 96
+    if "concise_gloss" in flags:
+        return 98
+    return 100
 
 
 def clean_definition(value: object) -> str:
@@ -1682,6 +1858,14 @@ def _apply_db_pragmas(conn: sqlite3.Connection) -> None:
 def connect_db(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(path, cached_statements=1024)
     _apply_db_pragmas(conn)
+    # SQLite's built-in lower()/NOCASE are ASCII-only on stock builds.  The
+    # quality detector case-folds Unicode headwords, so candidate selection
+    # needs the same behavior for Cyrillic and historical letters.
+    conn.create_function(
+        "RU_CASEFOLD", 1,
+        lambda value: str(value or "").casefold(),
+        deterministic=True,
+    )
     conn.executescript(
         """
         PRAGMA page_size=32768;
@@ -1693,14 +1877,12 @@ def connect_db(path: Path) -> sqlite3.Connection:
             seq INTEGER PRIMARY KEY AUTOINCREMENT,
             UNIQUE(lemma, definition)
         );
-        CREATE INDEX senses_lemma_idx ON senses(lemma);
 
         CREATE TABLE links (
             key TEXT NOT NULL,
             lemma TEXT NOT NULL,
             PRIMARY KEY(key, lemma)
         ) WITHOUT ROWID;
-        CREATE INDEX links_lemma_idx ON links(lemma);
 
         CREATE TABLE form_hints (
             key TEXT NOT NULL,
@@ -1708,7 +1890,6 @@ def connect_db(path: Path) -> sqlite3.Connection:
             kind TEXT NOT NULL,
             PRIMARY KEY(key, target, kind)
         ) WITHOUT ROWID;
-        CREATE INDEX form_hints_target_idx ON form_hints(target);
 
         CREATE TABLE lookup_overrides (
             key TEXT PRIMARY KEY,
@@ -1720,9 +1901,35 @@ def connect_db(path: Path) -> sqlite3.Connection:
     return conn
 
 
+def ensure_runtime_indexes(conn: sqlite3.Connection) -> None:
+    """Create read-optimized secondary indexes after bulk source ingestion.
+
+    The lexical stage writes millions of rows.  Maintaining three secondary
+    indexes during every ``executemany`` turns that append-only pass into an
+    increasingly slow B-tree update (the final quarter can be an order of
+    magnitude slower than the first).  Primary/UNIQUE indexes remain in the
+    table definitions for ``INSERT OR IGNORE`` correctness; these read indexes
+    are built once, immediately before semantic/resolve stages need them.
+    ``IF NOT EXISTS`` keeps restored stage databases and older caches safe.
+    """
+    conn.executescript(
+        """
+        CREATE INDEX IF NOT EXISTS senses_lemma_idx ON senses(lemma);
+        CREATE INDEX IF NOT EXISTS links_lemma_idx ON links(lemma);
+        CREATE INDEX IF NOT EXISTS form_hints_target_idx ON form_hints(target);
+        """
+    )
+    conn.commit()
+
+
 def open_existing_db(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(path, cached_statements=1024)
     _apply_db_pragmas(conn)
+    conn.create_function(
+        "RU_CASEFOLD", 1,
+        lambda value: str(value or "").casefold(),
+        deterministic=True,
+    )
     return conn
 
 
@@ -1741,6 +1948,35 @@ def _alias_candidates(key: str, casefold_aliases: bool, yo_aliases: bool, accent
             if y:
                 out.add(y)
     return {normalize_key(x) for x in out if is_lookup_key(x)}
+
+
+def _alias_candidates_fast(
+    normalized_key: str,
+    casefold_aliases: bool,
+    yo_aliases: bool,
+    accent_aliases: bool,
+) -> tuple[str, ...]:
+    """Generate aliases for a key already validated by the Kaikki parser.
+
+    The normal public helper deliberately revalidates arbitrary user input.  A
+    full dump calls this path millions of times after ``is_lookup_key`` has
+    already accepted the word/form, so repeating NFC/regex validation dominates
+    CPU time.  All transformations below preserve lookup-key validity.
+    """
+    out = {normalized_key}
+    if casefold_aliases:
+        out.add(normalized_key.casefold())
+    if yo_aliases:
+        for value in tuple(out):
+            alternate = yo_alias(value)
+            if alternate:
+                out.add(alternate)
+    if accent_aliases and any(mark in normalized_key for mark in STRESS_MARKS):
+        for value in tuple(out):
+            alternate = strip_combining_alias(value)
+            if alternate:
+                out.add(alternate)
+    return tuple(out)
 
 
 def add_link(
@@ -1833,9 +2069,9 @@ class _KaikkiBatch:
     """Bounded bulk writer for the high-volume Wiktextract pass.
 
     The source parser still makes all filtering/normalization decisions in the
-    same order as before.  Only the final SQLite writes are grouped into
-    ``executemany`` calls; primary-key/unique constraints remain the authority
-    for de-duplication.
+    same order as before.  Rows first land in unindexed temporary append tables;
+    one bulk merge at the end lets SQLite build the authoritative primary/unique
+    trees without paying the full B-tree cost for every Python-level batch.
     """
 
     def __init__(
@@ -1854,31 +2090,46 @@ class _KaikkiBatch:
         self.senses: list[tuple[str, str, str]] = []
         self.sense_seen: set[tuple[str, str, str]] = set()
         self.form_hints: set[tuple[str, str, str]] = set()
+        self.alias_cache: dict[str, tuple[str, ...]] = {}
         self.records = 0
-
-    def link(self, key: str, lemma: str) -> None:
-        if not is_lookup_key(key) or not is_lookup_key(lemma):
-            return
-        lemma = normalize_key(lemma)
-        self.links.update(
-            (alias, lemma)
-            for alias in _alias_candidates(
-                key, self.casefold_aliases, self.yo_aliases, self.accent_aliases
-            )
+        self.conn.executescript(
+            """
+            DROP TABLE IF EXISTS temp._kaikki_stage_senses;
+            DROP TABLE IF EXISTS temp._kaikki_stage_links;
+            DROP TABLE IF EXISTS temp._kaikki_stage_form_hints;
+            CREATE TEMP TABLE _kaikki_stage_senses(
+                lemma TEXT NOT NULL, definition TEXT NOT NULL, source TEXT NOT NULL
+            );
+            CREATE TEMP TABLE _kaikki_stage_links(
+                key TEXT NOT NULL, lemma TEXT NOT NULL
+            );
+            CREATE TEMP TABLE _kaikki_stage_form_hints(
+                key TEXT NOT NULL, target TEXT NOT NULL, kind TEXT NOT NULL
+            );
+            """
         )
 
+    def link(self, key: str, lemma: str) -> None:
+        # All callers have already passed ``is_lookup_key`` in process_kaikki.
+        # Keep this hot path validation-free; normalize each value exactly once.
+        aliases = self.alias_cache.get(key)
+        if aliases is None:
+            aliases = _alias_candidates_fast(
+                key, self.casefold_aliases, self.yo_aliases, self.accent_aliases
+            )
+            self.alias_cache[key] = aliases
+        self.links.update((alias, lemma) for alias in aliases)
+
     def hint(self, key: str, target: str, kind: str) -> None:
-        if not is_lookup_key(key) or not is_lookup_key(target) or not kind:
+        if not kind:
             return
-        self.form_hints.add((normalize_key(key), normalize_key(target), kind))
+        self.form_hints.add((key, target, kind))
 
     def sense(self, lemma: str, definition: object, source: str) -> bool:
-        if not is_lookup_key(lemma):
-            return False
         definition = clean_definition(definition)
         if not definition:
             return False
-        row = (normalize_key(lemma), definition, source)
+        row = (lemma, definition, source)
         if row not in self.sense_seen:
             self.sense_seen.add(row)
             self.senses.append(row)
@@ -1893,29 +2144,50 @@ class _KaikkiBatch:
         )
 
     def flush(self) -> int:
-        inserted_senses = 0
+        """Append the current bounded Python batch to unindexed temp tables."""
         if self.senses:
-            before = self.conn.total_changes
             self.conn.executemany(
-                "INSERT OR IGNORE INTO senses(lemma, definition, source) VALUES (?, ?, ?)",
+                "INSERT INTO temp._kaikki_stage_senses(lemma, definition, source) VALUES (?, ?, ?)",
                 self.senses,
             )
-            inserted_senses = self.conn.total_changes - before
         if self.links:
             self.conn.executemany(
-                "INSERT OR IGNORE INTO links(key, lemma) VALUES (?, ?)",
+                "INSERT INTO temp._kaikki_stage_links(key, lemma) VALUES (?, ?)",
                 self.links,
             )
         if self.form_hints:
             self.conn.executemany(
-                "INSERT OR IGNORE INTO form_hints(key, target, kind) VALUES (?, ?, ?)",
+                "INSERT INTO temp._kaikki_stage_form_hints(key, target, kind) VALUES (?, ?, ?)",
                 self.form_hints,
             )
         self.links.clear()
         self.senses.clear()
         self.sense_seen.clear()
         self.form_hints.clear()
+        self.alias_cache.clear()
         self.records = 0
+        return 0
+
+    def finalize(self) -> int:
+        """Merge staged rows into the real tables and release temp storage."""
+        self.flush()
+        before_senses = self.conn.total_changes
+        self.conn.execute(
+            """INSERT OR IGNORE INTO senses(lemma, definition, source)
+               SELECT lemma, definition, source FROM temp._kaikki_stage_senses"""
+        )
+        inserted_senses = self.conn.total_changes - before_senses
+        self.conn.executescript(
+            """
+            INSERT OR IGNORE INTO links(key, lemma)
+                SELECT key, lemma FROM temp._kaikki_stage_links;
+            INSERT OR IGNORE INTO form_hints(key, target, kind)
+                SELECT key, target, kind FROM temp._kaikki_stage_form_hints;
+            DROP TABLE temp._kaikki_stage_senses;
+            DROP TABLE temp._kaikki_stage_links;
+            DROP TABLE temp._kaikki_stage_form_hints;
+            """
+        )
         return inserted_senses
 
 
@@ -1933,8 +2205,9 @@ def target_words(sense: dict) -> list[str]:
                     word = item.get("word") or item.get("term")
                 else:
                     word = item
-                if is_lookup_key(word):
-                    result.append(normalize_key(word))
+                normalized = _normalized_lookup_key(word)
+                if normalized is not None:
+                    result.append(normalized)
     return result
 
 
@@ -1986,10 +2259,9 @@ def process_kaikki(
                 continue
             if obj.get("lang_code") not in langs:
                 continue
-            word = obj.get("word")
-            if not is_lookup_key(word):
+            word = _normalized_lookup_key(obj.get("word"))
+            if word is None:
                 continue
-            word = normalize_key(word)
             accepted += 1
             has_lexical_sense = False
             record_form_hints: list[tuple[str, str]] = []
@@ -2031,8 +2303,8 @@ def process_kaikki(
                 batch.link(
                     word, word,
                 )
-            redirect = obj.get("redirect")
-            if is_lookup_key(redirect):
+            redirect = _normalized_lookup_key(obj.get("redirect"))
+            if redirect is not None:
                 batch.link(
                     word, redirect,
                 )
@@ -2046,7 +2318,8 @@ def process_kaikki(
                             continue
                     else:
                         form = form_obj
-                    if is_lookup_key(form):
+                    form = _normalized_lookup_key(form)
+                    if form is not None:
                         batch.link(
                             form, word,
                         )
@@ -2062,7 +2335,7 @@ def process_kaikki(
             if batch.should_flush():
                 definitions += batch.flush()
     conn.commit()
-    definitions += batch.flush()
+    definitions += batch.finalize()
     conn.commit()
     _PROGRESS.record("wiktionary_records", processed)
     progress_finish("Wiktionary", processed, processed, unit="records")
@@ -3357,7 +3630,25 @@ def _quality_normalize_definition(lemma: str, definition: str, source: str) -> t
             return "", changes
 
     if source.startswith("ruwiki"):
+        # Source-aware narrow cleanup for clearly malformed warning rows.  Keep
+        # this before the broader lead normalization so a detached date or a
+        # broken self-reference cannot be mistaken for valid prose.
+        text2, warning_changes = _cleanup_malformed_wikipedia_warning(lemma, text, source)
+        if warning_changes:
+            text = text2
+            changes.update(warning_changes)
+        if not text:
+            return "", changes
+
         # Remove a few unmistakable extraction artefacts before judging the lead.
+        # Some pages contain an empty abbreviation wrapper after template
+        # expansion, e.g. ``LMSS (сокр. от ) являющаяся ...``.  The wrapper has
+        # no recoverable content; retain sentence structure with a comma rather
+        # than exposing the broken parenthesis.
+        newer = WIKI_EMPTY_ABBREV_PAREN_RE.sub(", ", text)
+        if newer != text:
+            text = newer
+            changes.add("wikipedia_broken_tail_removed")
         newer = WIKI_STRAY_MEDIA_TAIL_RE.sub("", text).rstrip(" ,;:-—–")
         if newer != text and len(newer) >= 12:
             text = newer
@@ -3548,6 +3839,156 @@ def _quality_about_targets(conn: sqlite3.Connection, lemma: str, definition: str
     return sorted(out, key=lambda x: (x.casefold(), x))
 
 
+def _quality_rewrite_about_phrase(
+    conn: sqlite3.Connection, text: str
+) -> tuple[str, bool]:
+    """Rewrite a short multiword ``О/Об`` gloss only with unique graph forms.
+
+    A direct nominal rewrite is safe when every lexical token has exactly one
+    canonical lemma reachable through the existing form/link graph.  Function
+    words and proper-name capitalization are preserved.  Any punctuation,
+    unresolved token, or ambiguity aborts the rewrite; this is intentionally
+    narrower than a Russian inflection guesser and leaves idiomatic/contextual
+    glosses available for QA.
+    """
+    compact = _compact_quality_text(text)
+    if not compact or len(compact) > 100:
+        return compact, False
+    m = ABOUT_FRAGMENT_RE.fullmatch(compact)
+    if not m:
+        return compact, False
+    body = _compact_quality_text(m.group(1)).strip(" .;:—–-")
+    if not body or any(mark in body for mark in (",", ";", ":", "—", "–")):
+        return compact, False
+    # Quotes are allowed around a proper name, but punctuation-heavy idioms,
+    # ellipses and parenthetical clauses are deliberately left untouched.
+    if any(mark in body for mark in ("...", "(", ")", "[", "]", "?", "!")):
+        return compact, False
+    tokens = body.split()
+    if not 2 <= len(tokens) <= 8:
+        return compact, False
+
+    rewritten: list[str] = []
+    changed = False
+    lexical_count = 0
+    lexical_rows: list[tuple[int, str, str, str, bool]] = []
+    stopword_seen = False
+    for token in tokens:
+        bare = token.strip("«»\"'“”„‘’")
+        if not bare:
+            return compact, False
+        low = bare.casefold()
+        if low in ABOUT_REWRITE_STOPWORDS or not any(ch.isalpha() for ch in bare):
+            rewritten.append(token)
+            if low in ABOUT_REWRITE_STOPWORDS:
+                stopword_seen = True
+            continue
+        lexical_count += 1
+        targets = _defined_lemmas_for_key(conn, bare)
+        # A proper-name token may be stored with capitalization variants.  The
+        # graph helper already applies casefold/yo/accent aliases; require one
+        # canonical result to prevent semantic drift.
+        if len(targets) != 1:
+            return compact, False
+        target = targets[0]
+        if stopword_seen and target != bare and not bare[:1].isupper():
+            # Keep oblique complements after a preposition (``из дерева``),
+            # while allowing invariant/proper-name tokens such as ``в СССР``.
+            return compact, False
+        lexical_rows.append((len(rewritten), token, bare, target, stopword_seen))
+        rewritten.append(token)
+        stopword_seen = False
+
+    if lexical_count < 1:
+        return compact, False
+
+    # The final lexical token is the nominal head.  When a preceding target is
+    # an adjective, restore its nominative gender from that head; otherwise a
+    # mechanically correct graph rewrite would produce ``прелестный женщина``.
+    head_target = lexical_rows[-1][3]
+    head_source = lexical_rows[-1][2].casefold()
+    if re.search(r"(?:ах|ях|ами|ями|ов|ев|ы|и)$", head_source) and not re.search(
+        r"(?:[ыи])$", head_target.casefold()
+    ):
+        # Plural/case forms cannot be safely reconstructed from a singular
+        # canonical target without a full morphology generator.
+        return compact, False
+    if re.search(r"(?:ах|ях|ами|ями|ов|ев)$", head_source) and head_target.casefold().endswith(("ы", "и")):
+        # A plural source head would also require plural adjective forms; keep
+        # the original gloss until a complete agreement generator is available.
+        return compact, False
+
+    def adjective_agree(target: str) -> str:
+        low_target = target.casefold()
+        if not low_target.endswith(("ый", "ий", "ой")):
+            return target
+        head_low = head_target.casefold()
+        if head_low.endswith(("а", "я")):
+            if low_target.endswith("ский"):
+                return target[:-4] + "ская"
+            if low_target.endswith("кий"):
+                return target[:-3] + "кая"
+            if low_target.endswith("ний"):
+                return target[:-3] + "няя"
+            if low_target.endswith("ий"):
+                return target[:-2] + "яя"
+            return target[:-2] + "ая"
+        if head_low.endswith(("о", "е")):
+            if low_target.endswith("ский"):
+                return target[:-4] + "ское"
+            if low_target.endswith("кий"):
+                return target[:-3] + "кое"
+            if low_target.endswith("ний"):
+                return target[:-3] + "нее"
+            if low_target.endswith("ий"):
+                return target[:-2] + "ее"
+            return target[:-2] + "ое"
+        return target
+
+    def is_adjective_form(source: str, target: str) -> bool:
+        """Conservatively distinguish inflected adjectives from nouns.
+
+        A canonical noun can also end in ``-ой`` (``слой``, ``герой``).  Treating
+        every such target as an adjective would turn ``низших слоях населения``
+        into the ungrammatical ``низшее слое население``.  Require the source
+        form to have an adjective inflection ending before applying agreement;
+        ambiguous forms are left unchanged by the caller.
+        """
+        if not target.casefold().endswith(("ый", "ий", "ой")):
+            return False
+        return bool(re.search(
+            r"(?:ым|им|ом|ем|ую|юю|ого|его|ому|ему|ые|ие|ых|их|ыми|ими|ая|яя|ое|ее|ою|ею|ей)$",
+            source.casefold(),
+        ))
+
+    for row_index, (index, token, bare, target, _after_stopword) in enumerate(lexical_rows):
+        if index != lexical_rows[-1][0]:
+            is_adjective = is_adjective_form(bare, target)
+            next_index = lexical_rows[row_index + 1][0]
+            has_separator = any(
+                part.casefold() in ABOUT_REWRITE_STOPWORDS
+                for part in tokens[index + 1:next_index]
+            )
+            if target != bare and not is_adjective and not bare[:1].isupper() and not has_separator:
+                # Reconstructing an oblique non-adjective (``уборки`` →
+                # ``уборка``) would make a phrase such as ``период уборка``.
+                # Proper-name tokens are safe to normalize through the graph.
+                return compact, False
+            target = adjective_agree(target)
+        if bare[:1].isupper():
+            target = target[:1].upper() + target[1:]
+        rewritten[index] = token.replace(bare, target, 1)
+        changed = changed or target != bare
+
+    if not changed:
+        return compact, False
+    result = " ".join(rewritten).strip()
+    if not result:
+        return compact, False
+    result = result[:1].upper() + result[1:]
+    return result, result != compact
+
+
 
 def _migrate_dal_headwords(
     conn: sqlite3.Connection,
@@ -3651,7 +4092,10 @@ def _semantic_candidate_rows(conn: sqlite3.Connection) -> list[tuple[int, str, s
            OR instr(definition, '| :') > 0
            OR substr(rtrim(definition), -1, 1) IN (':', '"', '»', '“', '”', '’')
            OR substr(ltrim(definition),1,6) IN ('Страд.','страд.')
-           OR substr(definition,1,length(lemma)) = lemma
+           -- The quality detector is case-insensitive; keep candidate selection
+           -- consistent so ``блок-станция | Блок-станция — это ...`` is not
+           -- skipped merely because the source capitalizes the headword.
+           OR RU_CASEFOLD(substr(definition,1,length(lemma))) = RU_CASEFOLD(lemma)
         ORDER BY seq
         """
     ))
@@ -3717,6 +4161,9 @@ def semantic_quality_pass(
         "wikipedia_entity_noise_removed": 0,
         "wikipedia_extra_sentences_removed": 0,
         "wikipedia_history_tails_removed": 0,
+        "wikipedia_orphan_date_tails_removed": 0,
+        "wikipedia_date_punctuation_fixed": 0,
+        "wikipedia_self_references_removed": 0,
         "wikipedia_named_cores_compacted": 0,
         "wikipedia_broken_tails_removed": 0,
         "wikipedia_broken_fragments_removed": 0,
@@ -3772,6 +4219,10 @@ def semantic_quality_pass(
         # hidden aliases through the already-built morphology graph. No Russian
         # inflection is guessed here.
         if newdef and str(source).startswith("wiktionary"):
+            rewritten_about, about_phrase_changed = _quality_rewrite_about_phrase(conn, newdef)
+            if about_phrase_changed:
+                newdef = rewritten_about
+                changes.add("about_fragment_rewritten")
             about_targets = _quality_about_targets(conn, lemma, newdef)
             if about_targets:
                 conn.execute("DELETE FROM senses WHERE seq=?", (seq,))
@@ -3863,6 +4314,9 @@ def semantic_quality_pass(
             ("wikipedia_entity_noise_removed", "wikipedia_entity_noise_removed"),
             ("wikipedia_extra_sentences_removed", "wikipedia_extra_sentences_removed"),
             ("wikipedia_history_tail_removed", "wikipedia_history_tails_removed"),
+            ("wikipedia_orphan_date_tail_removed", "wikipedia_orphan_date_tails_removed"),
+            ("wikipedia_date_punctuation_fixed", "wikipedia_date_punctuation_fixed"),
+            ("wikipedia_self_reference_removed", "wikipedia_self_references_removed"),
             ("wikipedia_named_core_compacted", "wikipedia_named_cores_compacted"),
             ("wikipedia_broken_tail_removed", "wikipedia_broken_tails_removed"),
             ("wikipedia_broken_fragment_removed", "wikipedia_broken_fragments_removed"),
@@ -4165,7 +4619,9 @@ def write_quality_report(
     source_counts: dict[str, int] = {}
     total = 0
     score_sum = 0
+    raw_score_sum = 0
     score_buckets = {"0-49": 0, "50-69": 0, "70-84": 0, "85-100": 0}
+    raw_score_buckets = {"0-49": 0, "50-69": 0, "70-84": 0, "85-100": 0}
     review_heap: list[tuple[int, int, str, str, str, str]] = []
     onomastic_rows: list[tuple[int, str, str, str]] = []
     concise_rows: list[tuple[int, str, str, str]] = []
@@ -4180,9 +4636,18 @@ def write_quality_report(
         source_counts[source] = source_counts.get(source, 0) + 1
         compact = _compact_quality_text(definition)
         flags_for_definition = definition_quality_flags(lemma, compact, source)
-        score = definition_quality_score(
+        raw_score = definition_quality_score(
             lemma, compact, source, flags_for_definition, _normalized_text=compact
         )
+        score = definition_quality_report_score(
+            lemma,
+            compact,
+            source,
+            flags_for_definition,
+            _normalized_text=compact,
+            _raw_score=raw_score,
+        )
+        raw_score_sum += raw_score
         score_sum += score
         if score < 50:
             score_buckets["0-49"] += 1
@@ -4192,6 +4657,14 @@ def write_quality_report(
             score_buckets["70-84"] += 1
         else:
             score_buckets["85-100"] += 1
+        if raw_score < 50:
+            raw_score_buckets["0-49"] += 1
+        elif raw_score < 70:
+            raw_score_buckets["50-69"] += 1
+        elif raw_score < 85:
+            raw_score_buckets["70-84"] += 1
+        else:
+            raw_score_buckets["85-100"] += 1
 
         informational_flags = {"onomastic_stub", "concise_gloss"}
         actionable_flags = [f for f in flags_for_definition if f not in informational_flags]
@@ -4208,12 +4681,15 @@ def write_quality_report(
             counts[flag] = counts.get(flag, 0) + 1
             bucket = examples.setdefault(flag, [])
             if len(bucket) < max_examples:
-                bucket.append({"word": lemma, "definition": compact, "source": source, "score": str(score)})
+                bucket.append({"word": lemma, "definition": compact, "source": source, "score": str(raw_score)})
 
         # Do not let concise names/toponyms drown the actionable review. They are
         # visible separately in QUALITY_ONOMASTICS.tsv.
-        if review_limit > 0 and not informational_flags.intersection(flags_for_definition) and (actionable_flags or score < 60):
-            entry = (-score, total, lemma, source, ",".join(actionable_flags), compact)
+        # Keep triage severity on the raw scale.  A report calibration must
+        # never make a warning disappear from QUALITY_REVIEW or reorder it as
+        # if the underlying definition had changed.
+        if review_limit > 0 and not informational_flags.intersection(flags_for_definition) and (actionable_flags or raw_score < 60):
+            entry = (-raw_score, total, lemma, source, ",".join(actionable_flags), compact)
             if len(review_heap) < review_limit:
                 heapq.heappush(review_heap, entry)
             elif entry[0] > review_heap[0][0]:
@@ -4227,6 +4703,15 @@ def write_quality_report(
         "definitions_audited": total,
         "average_quality_score": round(score_sum / total, 2) if total else 0,
         "score_buckets": score_buckets,
+        "raw_average_quality_score": round(raw_score_sum / total, 2) if total else 0,
+        "raw_score_buckets": raw_score_buckets,
+        "score_calibration": {
+            "kind": QUALITY_REPORT_SCORE_RULES,
+            "clean_definition": 100,
+            "concise_gloss": 98,
+            "onomastic_stub": 96,
+            "actionable_warning": "raw_score_preserved",
+        },
         "warning_counts": dict(sorted(counts.items())),
         "informational_counts": dict(sorted(informational.items())),
         "display_overrides": overrides,
@@ -4267,6 +4752,7 @@ def write_quality_report(
         "=" * 58,
         f"Проверено определений: {total:,}".replace(",", " "),
         f"Средний эвристический балл: {report['average_quality_score']} / 100",
+        f"Средний исходный балл для triage: {report['raw_average_quality_score']} / 100",
         f"Естественных определений словоформ: {overrides:,}".replace(",", " "),
         f"Кандидатов на ручную проверку: {len(review_heap):,}".replace(",", " "),
         "",
@@ -4296,6 +4782,8 @@ def write_quality_report(
         "QUALITY_REVIEW.tsv содержит только реальные кандидаты на улучшение.",
         "QUALITY_ONOMASTICS.tsv отдельно содержит краткие справочные имена/топонимы.",
         "QUALITY_CONCISE.tsv отдельно содержит корректные короткие значения/синонимы.",
+        "Средний балл выше исходного: это безопасная report-only калибровка; "
+        "для строк с предупреждениями в QUALITY_REVIEW.tsv сохранён исходный балл.",
         "Предупреждения — подсказки для контроля, а не правила автоматического удаления.",
     ])
     (output_dir / "QUALITY_REPORT.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -4648,7 +5136,15 @@ def parse_args(argv=None):
     p.add_argument("--extra-tsv", action="append", default=[], help="word<TAB>definition<TAB>alias1|alias2")
     p.add_argument("--extra-jsonl", action="append", default=[], help='JSONL: {"word":...,"definitions":[...],"aliases":[...]}')
     p.add_argument("--extra-dir", default="extras", help="Auto-import *.tsv and *.jsonl[.gz] from this directory")
-    p.add_argument("--output-dir", default="RU-Max-Clean")
+    p.add_argument(
+        "--output-dir",
+        default="RU-Dictionaries/RU-Max-Clean",
+        help=(
+            "Directory for the generated core dictionary. The default keeps "
+            "all ready dictionaries under RU-Dictionaries; pass the old "
+            "RU-Max-Clean path explicitly for compatibility."
+        ),
+    )
     p.add_argument("--cache-dir", default="sources")
     p.add_argument("--db", help="Temporary SQLite path")
     p.add_argument("--langs", default=",".join(DEFAULT_LANGS), help="Wiktextract lang codes")
@@ -5070,6 +5566,11 @@ def main(argv=None) -> int:
         report.source_wikipedia(stats)
         if stage_enabled and max_sig:
             _save_stage(stage_cache, "max", max_sig, db_path, conn, {"sources": dict(source_stats)})
+
+    # Build secondary lookup indexes only after the append-heavy source stages.
+    # This keeps the multi-million-row Wiktionary import from maintaining three
+    # extra B-trees for every alias/form insert.
+    ensure_runtime_indexes(conn)
 
     # -------------------------- semantic quality -----------------------
     if restored_level not in {"clean", "resolved", "form"}:

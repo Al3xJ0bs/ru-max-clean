@@ -34,7 +34,8 @@ Main online sources used by MAX mode:
 
 RU Max Clean never puts source labels/credits inside the small KOReader popup
 article because the user-facing format is definition-only. Build/source metadata
-is written separately to RU-Max-Clean/BUILD_INFO.json and SOURCES.txt.
+is written separately to RU-Dictionaries/RU-Max-Clean/BUILD_INFO.json and
+SOURCES.txt.
 
 Before redistributing a generated dictionary, review and comply with the current
 licenses of every source enabled in that build.

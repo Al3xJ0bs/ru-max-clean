@@ -2,13 +2,18 @@
 setlocal EnableExtensions DisableDelayedExpansion
 cd /d "%~dp0"
 chcp 65001 >nul 2>&1
-title RU Max Clean v1.6.0
+title RU Max Clean v1.6.1
 
 rem Keep this CMD file ASCII-only. All localized UI is printed by Python.
 set "PYTHONUTF8=1"
 set "PYTHONIOENCODING=utf-8"
 set "PIP_DISABLE_PIP_VERSION_CHECK=1"
 set "PYCMD="
+
+rem rapidgzip is intentionally disabled by the launcher: some Windows wheels
+rem make line-oriented Kaikki parsing dramatically slower.  The builder can
+rem still be tested explicitly with RU_MAX_ENABLE_RAPIDGZIP=1 outside this CMD.
+set "RU_MAX_ENABLE_RAPIDGZIP="
 
 call :FIND_PYTHON
 if defined PYCMD goto :HAVE_PYTHON
@@ -110,4 +115,3 @@ echo ERROR: Python environment setup failed.
 echo The detailed error is shown above. Nothing was deleted.
 pause
 exit /b 12
-

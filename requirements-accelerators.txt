@@ -1,6 +1,8 @@
 orjson>=3.10
 lxml>=5.0
 psutil>=6.0
+# Installed only for controlled benchmarking; the builder disables rapidgzip by
+# default on Windows because some wheels are slower for line-oriented Kaikki.
 rapidgzip>=0.16
 # Optional when a wheel exists for the current Python:
 indexed_bzip2>=1.7

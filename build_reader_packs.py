@@ -22,25 +22,66 @@ from build_ru_max_clean import (
     is_lookup_key,
     normalize_key,
 )
+from dictionary_layout import READER_PACKS_DIR_NAME, dictionaries_root
 from reader_pack_loader import PackEntry, load_pack_tsv
+from progress_ui import render as progress_render, finish as progress_finish
 
 
 PACK_METADATA: dict[str, dict[str, str]] = {
-    "latin_classical": {"language": "la", "kind": "classical phrases and terms"},
-    "latin_wiktionary": {"language": "la", "kind": "Russian-glossed Latin lexemes"},
-    "literary_archaic": {"language": "cu/orv/ru-old", "kind": "curated historical vocabulary"},
-    "literary_wiktionary": {"language": "cu/orv/ru-old", "kind": "Russian-glossed historical lexemes"},
-    "phraseology": {"language": "ru", "kind": "fixed expressions"},
-    "french_literary": {"language": "fr", "kind": "French words and expressions in Russian literary prose"},
-    "literary_names": {"language": "ru", "kind": "proper names and places from Russian literary reading"},
-    "fantasy_terms": {"language": "ru", "kind": "fantasy terminology and world-specific concepts"},
-    "literary_terms": {"language": "ru", "kind": "historical and culture-specific literary terms"},
-    "literary_abbreviations": {"language": "ru", "kind": "editorial abbreviations common in literary editions"},
+    "latin_classical": {
+        "title": "Латынь — классические выражения",
+        "language": "la", "kind": "classical phrases and terms",
+    },
+    "latin_wiktionary": {
+        "title": "Латынь — расширенный словарь",
+        "language": "la", "kind": "Russian-glossed Latin lexemes",
+    },
+    "literary_archaic": {
+        "title": "Архаика и церковнославянская лексика",
+        "language": "cu/orv/ru-old", "kind": "curated historical vocabulary",
+    },
+    "literary_wiktionary": {
+        "title": "Расширенная историческая лексика",
+        "language": "cu/orv/ru-old", "kind": "Russian-glossed historical lexemes",
+    },
+    "phraseology": {
+        "title": "Фразеологизмы и устойчивые выражения",
+        "language": "ru", "kind": "fixed expressions",
+    },
+    "french_literary": {
+        "title": "Французская лексика в литературе",
+        "language": "fr", "kind": "French words and expressions in Russian literary prose",
+    },
+    "literary_names": {
+        "title": "Литературные имена и названия",
+        "language": "ru", "kind": "proper names and places from Russian literary reading",
+    },
+    "fantasy_terms": {
+        "title": "Фэнтезийные термины",
+        "language": "ru", "kind": "fantasy terminology and world-specific concepts",
+    },
+    "literary_terms": {
+        "title": "Историко-культурные термины",
+        "language": "ru", "kind": "historical and culture-specific literary terms",
+    },
+    "literary_abbreviations": {
+        "title": "Литературные сокращения",
+        "language": "ru", "kind": "editorial abbreviations common in literary editions",
+    },
 }
 
 
 def _pack_slug(path: Path) -> str:
     return path.stem.casefold().replace("-", "_").replace(" ", "_")
+
+
+def pack_title(slug: str) -> str:
+    """Return the human-readable KOReader title for a stable pack slug."""
+
+    metadata = PACK_METADATA.get(slug)
+    if metadata and metadata.get("title"):
+        return metadata["title"]
+    return f"Дополнительный словарь — {slug}"
 
 
 def _insert_entries(conn: sqlite3.Connection, entries: list[PackEntry], source: str) -> dict[str, int]:
@@ -74,14 +115,16 @@ def build_pack(path: Path, output_root: Path, *, bookname: str | None = None) ->
     out_dir = output_root / slug
     out_dir.mkdir(parents=True, exist_ok=True)
     conn = connect_db(Path(":memory:"))
+    title = bookname or pack_title(slug)
     try:
         stats = _insert_entries(conn, entries, f"reader:{slug}")
-        result = build_stardict(conn, out_dir, bookname=bookname or f"RU Reader — {slug}")
+        result = build_stardict(conn, out_dir, bookname=title)
     finally:
         conn.close()
     payload = {
         "pack_version": "1.0",
         "pack": slug,
+        "title": title,
         **PACK_METADATA.get(slug, {"language": "und", "kind": "custom reader layer"}),
         "source_file": path.name,
         "built_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
@@ -98,15 +141,58 @@ def build_pack(path: Path, output_root: Path, *, bookname: str | None = None) ->
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build RU Max Clean optional reader dictionaries")
     parser.add_argument("--pack-dir", default="reader_packs", help="Directory containing *.tsv packs")
-    parser.add_argument("--output-dir", default="RU-Reader-Packs", help="Output directory for companion packs")
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Output directory for companion packs. Explicit paths remain "
+            "compatible with older scripts; by default the canonical "
+            "RU-Dictionaries/RU-Reader-Packs directory is used."
+        ),
+    )
+    parser.add_argument(
+        "--output-root",
+        type=Path,
+        default=None,
+        help=(
+            "Root for generated dictionaries (the reader packs are written "
+            "below its RU-Reader-Packs subdirectory). Cannot be combined with "
+            "--output-dir."
+        ),
+    )
     parser.add_argument("--pack", action="append", help="Build only this TSV filename (repeatable)")
     return parser.parse_args(argv)
+
+
+def output_dir_from_args(args: argparse.Namespace) -> Path:
+    """Resolve the companion output directory, preserving explicit old paths."""
+
+    if args.output_dir is not None and args.output_root is not None:
+        raise SystemExit("--output-dir and --output-root cannot be used together")
+    if args.output_dir is not None:
+        return Path(args.output_dir)
+    root = Path(args.output_root) if args.output_root is not None else dictionaries_root()
+    # ``--output-root`` is the canonical artifact root, not its parent.  For
+    # example, ``--output-root build`` means ``build/RU-Reader-Packs``.
+    return root / READER_PACKS_DIR_NAME
+
+
+def output_layout_label(output_dir: Path) -> str:
+    """Describe the canonical layout, or mark an explicitly custom path."""
+
+    canonical = (dictionaries_root() / READER_PACKS_DIR_NAME).resolve()
+    try:
+        output_dir.resolve().relative_to(canonical)
+    except ValueError:
+        return "custom"
+    return "RU-Dictionaries/RU-Reader-Packs"
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     pack_dir = Path(args.pack_dir)
-    output_dir = Path(args.output_dir)
+    output_dir = output_dir_from_args(args)
     if args.pack:
         paths = [pack_dir / name for name in args.pack]
     else:
@@ -115,13 +201,29 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"No reader packs found in {pack_dir}")
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest: list[dict[str, object]] = []
-    for path in paths:
-        if not path.exists():
-            raise SystemExit(f"Pack not found: {path}")
-        print(f"[READER PACK] {path.name}", flush=True)
-        manifest.append(build_pack(path, output_dir))
+    stage_label = "Дополнительные словари"
+    progress_render(stage_label, 0, len(paths), unit="слоёв", force=True)
+    try:
+        for index, path in enumerate(paths, start=1):
+            if not path.exists():
+                raise SystemExit(f"Pack not found: {path}")
+            slug = _pack_slug(path)
+            print(f"[READER PACK] {pack_title(slug)} ({path.name})", flush=True)
+            manifest.append(build_pack(path, output_dir))
+            progress_render(stage_label, index, len(paths), unit="слоёв", force=True)
+    finally:
+        progress_finish(stage_label, len(manifest), len(paths), unit="слоёв")
     (output_dir / "PACKS_MANIFEST.json").write_text(
-        json.dumps({"pack_version": "1.0", "packs": manifest}, ensure_ascii=False, indent=2) + "\n",
+        json.dumps(
+            {
+                "pack_version": "1.0",
+                "output_layout": output_layout_label(output_dir),
+                "packs": manifest,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
         encoding="utf-8",
     )
     print(f"[READER PACK] built {len(manifest)} pack(s) in {output_dir}")
@@ -130,4 +232,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

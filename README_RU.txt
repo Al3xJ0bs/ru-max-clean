@@ -1,4 +1,4 @@
-RU Max Clean — публичный релиз v1.6.0, builder-база 4.9.6
+RU Max Clean — публичный релиз v1.6.1, builder-база 4.9.6
 
 Это репозиторий программы-сборщика большого русско-русского словаря для
 литературного чтения. Готовые бинарные словари в GitHub Releases не публикуются:
@@ -64,9 +64,10 @@ MAX-источники
 Меню:
 
   1. Собрать словарь (профиль + дополнительные слои)
-     Выберите MAX или компактное русское ядро, затем 0, все или нужные
-     companion-пакеты. Лаунчер сам обновит источники, соберёт ядро и проверит
-     StarDict.
+     Выберите MAX или компактное русское ядро, затем цифровой вариант слоёв:
+     0 — только русское ядро, 1 — все слои, 2–11 — отдельные слои (несколько
+     номеров можно указать через пробел). Лаунчер сам проверит источники,
+     скачает только изменившиеся файлы, соберёт ядро и проверит StarDict.
 
   2. Быстро пересобрать русское ядро из кэшей
      Использует уже скачанные источники и готовые кэши без сетевого запроса.
@@ -100,7 +101,7 @@ winget, лаунчер пытается установить его автома
     orjson          быстрый JSON parser;
     lxml            быстрый XML parser;
     psutil          диагностика железа/приоритет процесса;
-    rapidgzip       многопоточное чтение .gz, в частности Kaikki;
+    rapidgzip       экспериментальный opt-in для .gz (не включается автоматически);
     indexed_bzip2   многопоточное чтение .bz2, если для текущего Python
                     доступен готовый совместимый модуль.
 
@@ -176,8 +177,11 @@ Wikipedia имеет ещё один подготовленный кэш:
 быть переопределено переменной RU_MAX_WIKI_WORKERS.
 
 Kaikki и Wikidata сначала проходят дешёвый byte-prefilter: полноценный JSON parser
-не запускается для заведомо нецелевых языков/лексем. Для gzip используется
-rapidgzip со всеми доступными CPU-потоками, когда модуль установлен. Для bzip2
+не запускается для заведомо нецелевых языков/лексем. Для gzip по умолчанию
+используется надёжный stdlib reader: некоторые Windows-сборки rapidgzip имеют
+аномально низкую скорость построчного чтения и превращают импорт Kaikki в
+многочасовой. rapidgzip можно вручную проверить отдельным запуском с
+`RU_MAX_ENABLE_RAPIDGZIP=1`, но обычному пользователю это не требуется. Для bzip2
 используется indexed_bzip2 с явно заданным количеством worker-потоков, когда он
 доступен; иначе остаётся безопасный stdlib fallback. Большие сетевые файлы по
 возможности скачиваются несколькими HTTP Range-соединениями.
@@ -231,11 +235,11 @@ QUALITY_REPORT
 --------------
 После MAX-сборки создаются:
 
-    RU-Max-Clean/QUALITY_REPORT.json
-    RU-Max-Clean/QUALITY_REPORT.txt
-    RU-Max-Clean/QUALITY_REVIEW.tsv
-    RU-Max-Clean/QUALITY_ONOMASTICS.tsv
-    RU-Max-Clean/QUALITY_CONCISE.tsv
+    RU-Dictionaries/RU-Max-Clean/QUALITY_REPORT.json
+    RU-Dictionaries/RU-Max-Clean/QUALITY_REPORT.txt
+    RU-Dictionaries/RU-Max-Clean/QUALITY_REVIEW.tsv
+    RU-Dictionaries/RU-Max-Clean/QUALITY_ONOMASTICS.tsv
+    RU-Dictionaries/RU-Max-Clean/QUALITY_CONCISE.tsv
 
 QUALITY_REVIEW.tsv — очередь до 5 000 действительно подозрительных статей с баллом,
 причиной, словом, источником и текущим определением. В старых версиях эта очередь почти целиком
@@ -251,8 +255,8 @@ QUALITY_ONOMASTICS.tsv. Короткие нормальные значения/�
 
 Машинная статистика и timings:
 
-    RU-Max-Clean/BUILD_STATS.json
-    RU-Max-Clean/BUILD_INFO.json
+    RU-Dictionaries/RU-Max-Clean/BUILD_STATS.json
+    RU-Dictionaries/RU-Max-Clean/BUILD_INFO.json
 
 В консоли выводятся русские выровненные секции и progress bars; JSON-структуры
 оставлены в файлах для диагностики.
@@ -308,22 +312,33 @@ form/artifact будут пересозданы один раз. Для перв
 
 Результат
 ---------
-После успешной сборки:
+После успешной сборки готовые артефакты собираются в единый корневой каталог
+`RU-Dictionaries`:
 
-    RU-Max-Clean/ru-max-clean.ifo
-    RU-Max-Clean/ru-max-clean.idx
-    RU-Max-Clean/ru-max-clean.dict
-    RU-Max-Clean/BUILD_INFO.json
-    RU-Max-Clean/BUILD_STATS.json
-    RU-Max-Clean/QUALITY_REPORT.json
-    RU-Max-Clean/QUALITY_REPORT.txt
-    RU-Max-Clean/QUALITY_REVIEW.tsv
-    RU-Max-Clean/QUALITY_ONOMASTICS.tsv
-    RU-Max-Clean/QUALITY_CONCISE.tsv
+    RU-Dictionaries/RU-Max-Clean/ru-max-clean.ifo
+    RU-Dictionaries/RU-Max-Clean/ru-max-clean.idx
+    RU-Dictionaries/RU-Max-Clean/ru-max-clean.dict
+    RU-Dictionaries/RU-Max-Clean/BUILD_INFO.json
+    RU-Dictionaries/RU-Max-Clean/BUILD_STATS.json
+    RU-Dictionaries/RU-Max-Clean/QUALITY_REPORT.json
+    RU-Dictionaries/RU-Max-Clean/QUALITY_REPORT.txt
+    RU-Dictionaries/RU-Max-Clean/QUALITY_REVIEW.tsv
+    RU-Dictionaries/RU-Max-Clean/QUALITY_ONOMASTICS.tsv
+    RU-Dictionaries/RU-Max-Clean/QUALITY_CONCISE.tsv
+    RU-Dictionaries/RU-Reader-Packs/<pack>/ru-max-clean.{ifo,idx,dict}
+    RU-Dictionaries/RU-Reader-Packs-100/literary_corpus_coverage.tsv
 
-Скопируйте всю RU-Max-Clean в:
+Скопируйте каталог ядра в:
 
-    koreader/data/dict/
+    koreader/data/dict/RU-Max-Clean/
+
+Выбранные companion-паки копируются из
+`RU-Dictionaries/RU-Reader-Packs/<pack>/` туда же. Внутренний
+`RU-Reader-Packs-100` предназначен только для QA и не нужен для обычного
+чтения. Старые каталоги `RU-Max-Clean`, `RU-Reader-Packs` и
+`RU-Reader-Packs-100` не удаляются и принимаются как legacy fallback; явный
+`--output-dir` позволяет продолжить старый сценарий, а новые сборки launcher-а
+пишутся только в `RU-Dictionaries`.
 
 Для скрытия строки «(запрос: ...)» в KOReader используйте:
 
@@ -337,4 +352,3 @@ MAX:     build.log
 Lexical: build_lexical.log
 
 При ошибке достаточно прислать соответствующий log и QUALITY_REPORT.json/txt. Для следующего массового quality-pass особенно полезны QUALITY_REVIEW.tsv и QUALITY_REPORT.json.
-

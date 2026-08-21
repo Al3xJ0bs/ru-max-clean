@@ -26,6 +26,9 @@ EXCLUDED_DIRS = {
     "_test_output",
     "RU-Max-Clean",
     "RU-Max-Clean-Production",
+    "RU-Reader-Packs",
+    "RU-Reader-Packs-100",
+    "RU-Dictionaries",
 }
 EXCLUDED_PREFIXES = ("RU-Max-Clean-", "RU-Reader-Packs-")
 EXCLUDED_SUFFIXES = {
@@ -191,4 +194,3 @@ def main(argv: Iterable[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -6,6 +6,7 @@ import struct
 import tempfile
 import unittest
 
+from build_reader_packs import pack_title
 from reader_layers import (
     KnownKeyMatcher,
     iter_stardict_keys,
@@ -75,6 +76,11 @@ class ReaderLayerTests(unittest.TestCase):
         self.assertGreaterEqual(len(literary_terms), 5)
         self.assertTrue(any(entry.word == "фельдкурат" for entry in literary_terms))
 
+    def test_pack_titles_are_reader_friendly(self) -> None:
+        self.assertEqual(pack_title("latin_wiktionary"), "Латынь — расширенный словарь")
+        self.assertEqual(pack_title("literary_abbreviations"), "Литературные сокращения")
+        self.assertEqual(pack_title("unknown_custom_layer"), "Дополнительный словарь — unknown_custom_layer")
+
     def test_stardict_index_stream(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "demo.idx"
@@ -102,4 +108,3 @@ class ReaderLayerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
-

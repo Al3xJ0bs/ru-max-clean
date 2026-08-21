@@ -28,6 +28,9 @@ def main() -> None:
         (root / "BUILD_INFO.json").write_text("{}\n", encoding="utf-8")
         (root / "RU-Max-Clean-4.9.1-PRODUCTION").mkdir()
         (root / "RU-Max-Clean-4.9.1-PRODUCTION" / "ru-max-clean.dict").write_bytes(b"not shipped")
+        for dirname in ("RU-Reader-Packs", "RU-Reader-Packs-100", "RU-Dictionaries"):
+            (root / dirname).mkdir()
+            (root / dirname / "PACKS_MANIFEST.json").write_text("{}\n", encoding="utf-8")
         (root / "book.epub").write_bytes(b"not shipped")
         (root / "test_books").mkdir()
         (root / "test_books" / "RU-Max-Clean-Dictionary-Test-Book.epub").write_bytes(b"test book")
@@ -60,6 +63,9 @@ def main() -> None:
             assert "BOOK_COVERAGE_ITERATION_FULL.json" not in names
             assert "QUALITY_REPORT.json" not in names
             assert "BUILD_INFO.json" not in names
+            assert not any(name.startswith("RU-Reader-Packs/") for name in names)
+            assert not any(name.startswith("RU-Reader-Packs-100/") for name in names)
+            assert not any(name.startswith("RU-Dictionaries/") for name in names)
             assert "book.epub" not in names
             assert not any(name.endswith(".dict") for name in names)
             manifest = json.loads(archive.read("BUILD_MANIFEST.json"))
@@ -72,4 +78,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

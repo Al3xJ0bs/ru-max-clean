@@ -1,6 +1,7 @@
 # Generated builds and caches
 RU-Max-Clean*/
 RU-Reader-Packs*/
+RU-Dictionaries*/
 dist/
 *.sha256
 sources/stage-cache/

@@ -21,6 +21,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
+from dictionary_layout import reader_coverage_dir
 from reader_layers import KnownKeyMatcher, iter_lookup_candidates, matcher_from_stardict
 from reader_layers import read_book_text, scan_coverage, write_json
 
@@ -126,7 +127,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("inputs", nargs="+", type=Path, help="EPUB/FB2/TXT books to audit")
     parser.add_argument("--index", required=True, type=Path, help="Existing StarDict .idx")
     parser.add_argument("--core-db", type=Path, help="Optional resolved SQLite stage cache")
-    parser.add_argument("--output-tsv", type=Path, default=Path("RU-Reader-Packs-100/literary_corpus_coverage.tsv"))
+    parser.add_argument(
+        "--output-tsv",
+        type=Path,
+        default=reader_coverage_dir() / "literary_corpus_coverage.tsv",
+        help="Coverage fallback TSV (defaults under RU-Dictionaries/RU-Reader-Packs-100)",
+    )
     parser.add_argument("--report", type=Path, default=Path("BOOK_COVERAGE_INTERNAL.json"))
     return parser.parse_args(argv)
 
@@ -143,4 +149,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
