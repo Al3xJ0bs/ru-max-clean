@@ -145,6 +145,9 @@ def semantic_cleanup(stats: Mapping[str, Any]) -> None:
         ("Удалено энциклопедического шума Wikipedia", fmt_int(stats.get("wikipedia_entity_noise_removed", 0))),
         ("Убрано лишних предложений Wikipedia", fmt_int(stats.get("wikipedia_extra_sentences_removed", 0))),
         ("Убрано датированных исторических хвостов", fmt_int(stats.get("wikipedia_history_tails_removed", 0))),
+        ("Убрано оторванных датовых хвостов Wikipedia", fmt_int(stats.get("wikipedia_orphan_date_tails_removed", 0))),
+        ("Исправлено пробелов перед пунктуацией дат Wikipedia", fmt_int(stats.get("wikipedia_date_punctuation_fixed", 0))),
+        ("Удалено явно сломанных самоссылок Wikipedia", fmt_int(stats.get("wikipedia_self_references_removed", 0))),
         ("Именованных Wikipedia-объектов сжато до класса", fmt_int(stats.get("wikipedia_named_cores_compacted", 0))),
         ("Исправлено сломанных хвостов Wikipedia", fmt_int(stats.get("wikipedia_broken_tails_removed", 0))),
         ("Удалено сломанных фрагментов Wikipedia", fmt_int(stats.get("wikipedia_broken_fragments_removed", 0))),
@@ -254,10 +257,16 @@ def stardict(result: Mapping[str, Any]) -> None:
 
 
 def turbo(stats: Mapping[str, Any]) -> None:
+    if stats.get("rapidgzip"):
+        rapidgzip_status = "включён (параллельный gzip)"
+    elif stats.get("rapidgzip_installed"):
+        rapidgzip_status = "установлен, отключён (надёжный stdlib gzip)"
+    else:
+        rapidgzip_status = "не установлен / stdlib gzip"
     rows = [
         ("orjson", "включён" if stats.get("orjson") else "не установлен / fallback"),
         ("lxml", "включён" if stats.get("lxml") else "не установлен / fallback"),
-        ("rapidgzip", "включён (параллельный gzip)" if stats.get("rapidgzip") else "не установлен / stdlib gzip"),
+        ("rapidgzip", rapidgzip_status),
         ("indexed_bzip2", "включён (параллельный bzip2)" if stats.get("indexed_bzip2") else "не установлен / stdlib bz2"),
         ("Потоков CPU", fmt_int(stats.get("cpus", 0))),
         ("SQLite threads (сортировка/индексы)", fmt_int(stats.get("workers", 0))),

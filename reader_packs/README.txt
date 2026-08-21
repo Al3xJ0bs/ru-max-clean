@@ -25,4 +25,11 @@ extract_wiktionary_pack.py.  Check the upstream Wiktionary/Kaikki license and
 attribution requirements before redistribution.
 
 Generated StarDict files are deliberately not stored here.  Build them with
-build_reader_packs.py into a separate output directory.
+build_reader_packs.py; by default they go to
+RU-Dictionaries/RU-Reader-Packs/<pack>/. An explicit --output-dir still allows
+older installations to keep using a top-level RU-Reader-Packs directory.
+
+The folder slugs stay stable for scripts and upgrades.  The generated StarDict
+titles shown by KOReader are reader-friendly Russian names rather than raw
+filenames (for example, "Латынь — расширенный словарь" and
+"Литературные сокращения").

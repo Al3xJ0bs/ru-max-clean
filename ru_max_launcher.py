@@ -14,26 +14,47 @@ import threading
 import time
 from pathlib import Path
 
+from dictionary_layout import (
+    core_dir,
+    dictionaries_root,
+    existing_or_canonical,
+    legacy_core_dir,
+    reader_coverage_dir,
+    reader_packs_dir,
+)
 from version_info import BUILDER_VERSION, PUBLIC_VERSION
 
 BASE = Path(__file__).resolve().parent
-OUT = BASE / "RU-Max-Clean"
+DICTIONARIES = dictionaries_root(BASE)
+OUT = core_dir(BASE)
+LEGACY_OUT = legacy_core_dir(BASE)
+READER_OUT = reader_packs_dir(BASE)
+READER_COVERAGE_OUT = reader_coverage_dir(BASE)
+# Descriptive aliases for integrations that do not use the historic ``OUT``
+# name.  All new writes still go through the same canonical paths above.
+OUTPUT_ROOT = DICTIONARIES
+CORE_OUTPUT = OUT
+READER_PACKS_OUTPUT = READER_OUT
+READER_COVERAGE_OUTPUT = READER_COVERAGE_OUT
 SOURCES = BASE / "sources"
 STATE = BASE / ".ru_max_build_state.json"
 VERSION = BUILDER_VERSION
 
-READER_PACKS: dict[str, tuple[str, str]] = {
-    "1": ("latin_classical.tsv", "Латынь: классические выражения"),
-    "2": ("latin_wiktionary.tsv", "Латынь: расширенный слой"),
-    "3": ("literary_archaic.tsv", "Архаика и церковнославянская лексика"),
-    "4": ("literary_wiktionary.tsv", "Расширенная историческая лексика"),
-    "5": ("french_literary.tsv", "Французская лексика в русской прозе"),
-    "6": ("literary_names.tsv", "Литературные имена и названия"),
-    "7": ("fantasy_terms.tsv", "Фэнтезийные термины"),
-    "8": ("literary_terms.tsv", "Историко-культурные термины"),
-    "9": ("phraseology.tsv", "Фразеологизмы"),
-    "10": ("literary_abbreviations.tsv", "Литературные сокращения и пометы"),
-}
+# Every interactive choice is numeric.  In particular, do not mix the old
+# ``A``/``все`` spellings with numbered entries: a user can now use the same
+# input convention in every menu and on every keyboard layout.
+READER_PACKS: tuple[tuple[str, str], ...] = (
+    ("latin_classical.tsv", "Латынь: классические выражения"),
+    ("latin_wiktionary.tsv", "Латынь: расширенный слой"),
+    ("literary_archaic.tsv", "Архаика и церковнославянская лексика"),
+    ("literary_wiktionary.tsv", "Расширенная историческая лексика"),
+    ("french_literary.tsv", "Французская лексика в русской прозе"),
+    ("literary_names.tsv", "Литературные имена и названия"),
+    ("fantasy_terms.tsv", "Фэнтезийные термины"),
+    ("literary_terms.tsv", "Историко-культурные термины"),
+    ("phraseology.tsv", "Фразеологизмы"),
+    ("literary_abbreviations.tsv", "Литературные сокращения и пометы"),
+)
 
 
 def header() -> None:
@@ -79,8 +100,9 @@ def set_above_normal_priority() -> None:
 
 
 def run_stream(cmd: list[str], *, log_path: Path | None = None, title: str = "") -> int:
+    started = time.monotonic()
     if title:
-        print(f"\n--- {title} ---")
+        print(f"\n[ЭТАП] {title}: запуск", flush=True)
     log = log_path.open("a", encoding="utf-8", errors="replace") if log_path else None
     if log:
         log.write("\n--- " + title + " ---\n")
@@ -185,6 +207,9 @@ def run_stream(cmd: list[str], *, log_path: Path | None = None, title: str = "")
         if log and not progress_mode:
             log.write(buf + "\n")
     rc = p.wait()
+    if title:
+        elapsed = time.monotonic() - started
+        print(f"[ЭТАП] {title}: завершён за {elapsed:.1f} с", flush=True)
     if log:
         log.write(f"Exit code: {rc}\n")
         log.close()
@@ -193,7 +218,11 @@ def run_stream(cmd: list[str], *, log_path: Path | None = None, title: str = "")
 
 def local_build_fingerprint() -> str:
     h = hashlib.sha256()
-    files = [BASE / "build_ru_max_clean.py", BASE / "source_manager.py", BASE / "stage_cache.py", BASE / "progress_ui.py", BASE / "human_report.py", BASE / "ru_max_launcher.py"]
+    files = [
+        BASE / "build_ru_max_clean.py", BASE / "source_manager.py", BASE / "stage_cache.py",
+        BASE / "progress_ui.py", BASE / "human_report.py", BASE / "ru_max_launcher.py",
+        BASE / "dictionary_layout.py",
+    ]
     extras = BASE / "extras"
     if extras.exists():
         files.extend(sorted(p for p in extras.rglob("*") if p.is_file()))
@@ -242,14 +271,29 @@ def save_state(profile: str, reader_packs: list[str] | None = None) -> None:
     STATE.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def build_files_exist() -> bool:
-    return all((OUT / f"ru-max-clean.{ext}").exists() for ext in ("ifo", "idx", "dict"))
+def selected_core_output() -> Path:
+    """Return the canonical core output, or a pre-upgrade legacy output.
+
+    Existing installations are not copied implicitly: a production dictionary
+    can be hundreds of megabytes and users may prefer to keep it in place.
+    New builds always target ``RU-Dictionaries/RU-Max-Clean``.
+    """
+
+    return existing_or_canonical(OUT, LEGACY_OUT)
+
+
+def build_files_exist(output_dir: Path | None = None) -> bool:
+    output_dir = output_dir or selected_core_output()
+    return all((output_dir / f"ru-max-clean.{ext}").exists() for ext in ("ifo", "idx", "dict"))
 
 
 def is_current(profile: str) -> bool:
     st = read_state()
     return (
-        build_files_exist()
+        # Smart-build freshness is a write-path decision: a legacy dictionary
+        # may be validated as a read-only fallback, but it must not suppress a
+        # first build into the canonical RU-Dictionaries tree.
+        build_files_exist(OUT)
         and st.get("version") == VERSION
         and st.get("profile") == profile
         and st.get("sources") == fingerprints(read_manifest())
@@ -275,32 +319,70 @@ def validate(log_path: Path | None = None) -> int:
     if not build_files_exist():
         print("Словарь RU-Max-Clean ещё не собран.")
         return 11
+    output_dir = selected_core_output()
+    if output_dir == LEGACY_OUT:
+        print(
+            "Используется старый путь RU-Max-Clean; новый результат будет "
+            "сохраняться в RU-Dictionaries/RU-Max-Clean."
+        )
     return run_stream(
-        [sys.executable, "validate_stardict.py", str(OUT / "ru-max-clean")],
+        [sys.executable, "validate_stardict.py", str(output_dir / "ru-max-clean")],
         log_path=log_path, title="Проверка StarDict",
     )
+
+
+def parse_reader_pack_choice(raw: str) -> list[str] | None:
+    """Parse the all-numeric companion-pack selection.
+
+    ``None`` means that the input was invalid, while an empty list is the
+    explicit ``0`` choice.  Keeping those states separate lets the UI explain
+    a typo without silently turning it into "no extra layers".
+    """
+    tokens = raw.split()
+    if not tokens:
+        return []
+    if any(not token.isascii() or not token.isdigit() for token in tokens):
+        return None
+    if "0" in tokens:
+        return [] if len(tokens) == 1 else None
+    if "1" in tokens:
+        return [filename for filename, _label in READER_PACKS] if len(tokens) == 1 else None
+    selected: list[str] = []
+    for token in tokens:
+        number = int(token)
+        index = number - 2
+        if not 0 <= index < len(READER_PACKS):
+            return None
+        filename = READER_PACKS[index][0]
+        if filename not in selected:
+            selected.append(filename)
+    return selected
+
+
+def parse_profile_choice(raw: str) -> str | None:
+    """Return a profile for the numeric profile menu, or ``None`` on typo."""
+    value = raw.strip()
+    if value in {"", "1"}:
+        return "max"
+    if value == "2":
+        return "lexical"
+    return None
 
 
 def choose_reader_packs() -> list[str]:
     """Ask once which optional dictionaries should accompany the core build."""
     print("\nДополнительные словари (русское ядро собирается всегда):")
     print("  0. Не собирать дополнительные слои")
-    print("  A. Собрать все слои")
-    for key, (_filename, label) in READER_PACKS.items():
-        print(f"  {key}. {label}")
-    choice = input("Выбор [0]: ").strip().casefold()
-    if choice in {"a", "все", "all"}:
-        return [filename for filename, _label in READER_PACKS.values()]
-    if choice in {"", "0"}:
-        return []
-    selected: list[str] = []
-    for key in choice.replace(",", " ").split():
-        item = READER_PACKS.get(key)
-        if item and item[0] not in selected:
-            selected.append(item[0])
-    if not selected:
-        print("Не удалось распознать выбор; дополнительные слои пропущены.")
-    return selected
+    print("  1. Собрать все слои")
+    for index, (_filename, label) in enumerate(READER_PACKS, start=2):
+        print(f"  {index}. {label}")
+    print("Можно указать несколько номеров через пробел. Используются только цифры.")
+    while True:
+        choice = input("Выбор [0]: ").strip()
+        selected = parse_reader_pack_choice(choice)
+        if selected is not None:
+            return selected
+        print("Введите 0, 1 или номера слоёв через пробел (только цифры).")
 
 
 def build_reader_layers(pack_names: list[str]) -> int:
@@ -309,25 +391,27 @@ def build_reader_layers(pack_names: list[str]) -> int:
     args = [
         sys.executable, "build_reader_packs.py",
         "--pack-dir", "reader_packs",
-        "--output-dir", "RU-Reader-Packs",
+        "--output-dir", str(READER_OUT),
     ]
     for name in pack_names:
         args.extend(["--pack", name])
-    return run_stream(args, title="Сборка выбранных дополнительных словарей")
+    return run_stream(args, title="Дополнительные словари")
 
 
 def guided_build() -> int:
-    """One coherent user workflow: profile, layers, source mode, build, validate."""
+    """One coherent workflow: profile, layers, automatic update, build, validate."""
     print("\nРусское ядро:")
     print("  1. MAX — полный профиль, включая Wikipedia")
     print("  2. Компактный — без большой Wikipedia")
-    profile_choice = input("Выбор [1]: ").strip()
-    profile = "lexical" if profile_choice == "2" else "max"
+    while True:
+        profile = parse_profile_choice(input("Выбор [1]: "))
+        if profile is not None:
+            break
+        print("Введите 1 или 2 (только цифры).")
     pack_names = choose_reader_packs()
-    mode = input("\nОбновлять источники перед сборкой? [Д/н]: ").strip().casefold()
-    offline = mode in {"н", "n", "нет", "no"}
-    print("\nСборка начинается. При повторном запуске неизменившиеся кэши будут переиспользованы.")
-    rc = build(profile, offline=offline, smart=not offline)
+    print("\nПроверяю источники и автоматически скачиваю только появившиеся обновления.")
+    print("При повторном запуске неизменившиеся кэши будут переиспользованы.")
+    rc = build(profile, offline=False, smart=True)
     if rc:
         return rc
     rc = build_reader_layers(pack_names)
@@ -389,7 +473,7 @@ def build(
     # mode has no raw source arguments by design.
     if rebuild_stage_cache:
         args += ["--rebuild-stage-cache"]
-    args += ["--output-dir", "RU-Max-Clean"]
+    args += ["--output-dir", str(OUT)]
     rc = run_stream(args, log_path=log_path, title="Сборка словаря")
     if rc:
         return rc
@@ -405,7 +489,10 @@ def diagnostics() -> int:
     print(hardware_summary())
     subprocess.call([sys.executable, "bootstrap.py", "--check-only"], cwd=BASE)
     print(f"Sources: {SOURCES}")
-    print(f"Dictionary: {OUT}")
+    print(f"Dictionaries root: {DICTIONARIES}")
+    print(f"Core dictionary: {selected_core_output()}")
+    print(f"Reader packs: {READER_OUT}")
+    print(f"Reader coverage QA: {READER_COVERAGE_OUT}")
     print(f"Cached source files: {sum(1 for p in SOURCES.glob('*') if p.is_file()) if SOURCES.exists() else 0}")
     stage_dir = SOURCES / "stage-cache"
     if stage_dir.exists():

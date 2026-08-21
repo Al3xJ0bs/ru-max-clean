@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import shutil
 import json
+import os
 import sqlite3
 import struct
 import subprocess
@@ -9,7 +10,7 @@ import tarfile
 import zlib
 from pathlib import Path
 
-from build_ru_max_clean import is_lookup_key
+from build_ru_max_clean import _rapidgzip_enabled, is_lookup_key
 
 ROOT = Path(__file__).resolve().parent
 OUT = ROOT / "_test_output"
@@ -18,6 +19,15 @@ LEGACY = ROOT / "_test_dal.tar.bz2"
 assert is_lookup_key("è")
 assert is_lookup_key("à")
 assert is_lookup_key("Brüder")
+
+# rapidgzip must never be selected merely because a wheel happens to be
+# installed.  This protects Windows users from the known slow readline path.
+_rapidgzip_flag = os.environ.pop("RU_MAX_ENABLE_RAPIDGZIP", None)
+try:
+    assert not _rapidgzip_enabled()
+finally:
+    if _rapidgzip_flag is not None:
+        os.environ["RU_MAX_ENABLE_RAPIDGZIP"] = _rapidgzip_flag
 
 
 def lookup(base: Path, word: str):
@@ -213,8 +223,30 @@ def main():
     # 4.3 QUALITY_REPORT without touching the expensive source parsers.
     from build_ru_max_clean import (
         _quality_normalize_definition, semantic_quality_pass, wikipedia_quality_rescue,
-        connect_db, add_sense, add_link, write_quality_report, _alias_candidates,
+        connect_db, ensure_runtime_indexes, add_sense, add_link, write_quality_report,
+        _alias_candidates, _quality_rewrite_about_phrase,
     )
+    index_db = ROOT / "_deferred_indexes.sqlite3"
+    index_db.unlink(missing_ok=True)
+    ic = connect_db(index_db)
+    before_indexes = {
+        row[0]
+        for row in ic.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'"
+        ).fetchall()
+    }
+    assert "senses_lemma_idx" not in before_indexes
+    assert "links_lemma_idx" not in before_indexes
+    assert "form_hints_target_idx" not in before_indexes
+    ensure_runtime_indexes(ic)
+    after_indexes = {
+        row[0]
+        for row in ic.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'"
+        ).fetchall()
+    }
+    assert {"senses_lemma_idx", "links_lemma_idx", "form_hints_target_idx"} <= after_indexes
+    ic.close(); index_db.unlink(missing_ok=True)
     # Stress aliases must preserve Cyrillic breve: ``руко́й`` -> ``рукой``,
     # never the corrupt ``рукои``.
     assert "рукой" in _alias_candidates("руко́й", True, True, True)
@@ -265,6 +297,47 @@ def main():
         "Fairlight CMI", "(с функциями сэмплера и цифровой звуковой рабочей станции) выпущенный в 1979 году компанией .", "ruwiki-lead"
     )
     assert q == ""
+    # Source-aware Wikipedia fixtures: only a completed lead followed by a
+    # detached date/history tail is trimmed.  The same text from Wiktionary is
+    # left alone, and a malformed exact-title ``(,`` self-reference is rejected
+    # without broad parenthetical/about rewrites.
+    q, changes = _quality_normalize_definition(
+        "Захват Бахрейна",
+        "Захват Бахрейна войсками персидского шаха Аббаса I в 1602 году. , 1622 год",
+        "ruwiki-lead",
+    )
+    assert q == "Захват Бахрейна войсками персидского шаха Аббаса I в 1602 году."
+    assert "wikipedia_orphan_date_tail_removed" in changes
+    q, changes = _quality_normalize_definition(
+        "Захват Бахрейна",
+        "Захват Бахрейна войсками персидского шаха Аббаса I в 1602 году. , 1622 год",
+        "wiktionary:ru",
+    )
+    assert q.endswith("1622 год") and not changes
+    q, changes = _quality_normalize_definition(
+        "Национальная пресса (Бразилия)",
+        "Национальная пресса в период с 2007 по 2010 год. , историческое издание Национальной прессы 1991 года.",
+        "ruwiki-lead",
+    )
+    assert q == "Национальная пресса в период с 2007 по 2010 год."
+    assert "wikipedia_orphan_date_tail_removed" in changes
+    q, changes = _quality_normalize_definition(
+        "Закон о регистрации",
+        "Закон США, принятый в 1938 году .",
+        "ruwiki-lead",
+    )
+    assert q == "Закон США, принятый в 1938 году."
+    assert "wikipedia_date_punctuation_fixed" in changes
+    q, changes = _quality_normalize_definition(
+        "Кирха в Кведнау",
+        "Кирха в Кведнау (, ныне называется Северная Гора), районе Кёнигсберга (сейчас — конец улицы Александра Невского в Калининграде).",
+        "ruwiki-lead",
+    )
+    assert q == "" and "wikipedia_self_reference_removed" in changes
+    q, changes = _quality_normalize_definition(
+        "GiNaC", "GiNaC является C++ библиотекой.", "ruwiki-lead"
+    )
+    assert q == "GiNaC является C++ библиотекой." and "wikipedia_self_reference_removed" not in changes
     q, changes = _quality_normalize_definition(
         ".460 Steyr", "Крупнокалиберный патрон, разработанный австрийской компанией Steyr в 2002 году.", "ruwiki-lead"
     )
@@ -321,6 +394,17 @@ def main():
         "1000 км Алгарве 2010", "Третий раунд сезона 2010 LMS.", "ruwiki-lead"
     )
     assert q == ""
+    # Wikipedia date detection must not mistake a version/range token such as
+    # ECMAScript 2015+ for an encyclopedic historical date.
+    from build_ru_max_clean import _human_years
+    assert _human_years("ECMAScript 2015+ и 2016 года") == {"2016"}
+    q, changes = _quality_normalize_definition(
+        "LMSS",
+        "Космическая платформа LMSS (сокр. от ) являющаяся подразделением компании.",
+        "ruwiki-lead",
+    )
+    assert "LMSS, являющаяся" in q
+    assert "wikipedia_broken_tail_removed" in changes
 
     alias_db = ROOT / "_quality_alias.sqlite3"
     alias_db.unlink(missing_ok=True)
@@ -358,7 +442,39 @@ def main():
     # another real meaning.  Morphology-resolvable "О ..." glosses become hidden
     # aliases, while an unresolved long "то же, что" expansion becomes direct
     # semantic text rather than metadata.
-    from build_ru_max_clean import _parse_alias_formula, definition_quality_flags
+    from build_ru_max_clean import (
+        _parse_alias_formula,
+        definition_quality_flags,
+        definition_quality_report_score,
+        definition_quality_score,
+    )
+    # Report calibration is deliberately separate from the raw heuristic used
+    # for source selection.  Clean prose can report as high-confidence without
+    # changing text, while an actionable warning keeps its raw severity.
+    clean_definition = "Органическое вещество, образующееся в клетках растений."
+    clean_flags = definition_quality_flags("хлорофилл", clean_definition, "wiktionary:ru")
+    clean_raw = definition_quality_score("хлорофилл", clean_definition, "wiktionary:ru", clean_flags)
+    assert not clean_flags
+    assert clean_raw < definition_quality_report_score(
+        "хлорофилл", clean_definition, "wiktionary:ru", clean_flags, _raw_score=clean_raw
+    ) == 100
+    concise_flags = definition_quality_flags("Александр", "мужское имя", "wiktionary:ru")
+    assert concise_flags == ["onomastic_stub"]
+    assert definition_quality_report_score(
+        "Александр", "мужское имя", "wiktionary:ru", concise_flags
+    ) == 96
+    warning_text = "О доме"
+    warning_flags = definition_quality_flags("дом", warning_text, "wiktionary:ru")
+    warning_raw = definition_quality_score("дом", warning_text, "wiktionary:ru", warning_flags)
+    assert "about_fragment" in warning_flags
+    assert definition_quality_report_score(
+        "дом", warning_text, "wiktionary:ru", warning_flags, _raw_score=warning_raw
+    ) == warning_raw
+    # An unflagged but very-low raw score is kept visible until its detector is
+    # improved; calibration must not turn likely residue into a false 100.
+    assert definition_quality_report_score(
+        "термтест", "Женщина)", "wiktionary:ru", [], _raw_score=42
+    ) == 42
     assert _parse_alias_formula("Вариант бдеющій") is not None
     assert _parse_alias_formula("Вариант бѹкварь") is not None
     assert _parse_alias_formula("Вариант грѧдꙑ") is not None
@@ -431,6 +547,55 @@ def main():
     assert rel.execute("SELECT COUNT(*) FROM senses WHERE lemma='Бомбей'").fetchone()[0] == 0
     assert rel.execute("SELECT 1 FROM links WHERE key='Бомбей' AND lemma='Мумбаи'").fetchone()
     rel.close(); relation_db.unlink(missing_ok=True)
+
+    # DB-aware nominal rewrite: inflected lexical tokens are changed only when
+    # every token has one morphology-graph target; stopwords stay untouched and
+    # clause-like punctuation aborts the rewrite.
+    phrase_db = ROOT / "_quality_about_phrase.sqlite3"
+    phrase_db.unlink(missing_ok=True)
+    pc = connect_db(phrase_db)
+    for target in ("секс", "СССР", "мужской", "половой", "член", "низший", "слой", "население"):
+        add_sense(pc, target, "Смысл слова.", "test")
+        add_link(pc, target, target)
+    for form, target in (
+        ("сексе", "секс"), ("мужском", "мужской"),
+        ("половом", "половой"), ("члене", "член"),
+        ("низших", "низший"), ("слоях", "слой"), ("населения", "население"),
+    ):
+        add_link(pc, form, target)
+    assert _quality_rewrite_about_phrase(pc, "О сексе в СССР") == ("Секс в СССР", True)
+    assert _quality_rewrite_about_phrase(pc, "О мужском половом члене") == ("Мужской половой член", True)
+    # A noun ending in ``-ой`` must not be mistaken for an adjective when
+    # reconstructing agreement (``слой`` is the real-world regression).
+    assert _quality_rewrite_about_phrase(pc, "О низших слоях населения")[1] is False
+    assert _quality_rewrite_about_phrase(pc, "О деятельном, неутомимом человеке")[1] is False
+    add_sense(pc, "тестовая фраза", "О сексе в СССР", "wiktionary:ru")
+    add_link(pc, "тестовая фраза", "тестовая фраза")
+    semantic_quality_pass(pc)
+    assert pc.execute(
+        "SELECT definition FROM senses WHERE lemma='тестовая фраза'"
+    ).fetchone()[0] == "Секс в СССР"
+    pc.close(); phrase_db.unlink(missing_ok=True)
+
+    # Candidate selection must match the case-insensitive quality detector.  A
+    # capitalized source lead must not bypass the headword-prefix cleanup just
+    # because the stored lemma is lowercase.
+    case_db = ROOT / "_quality_casefold_candidate.sqlite3"
+    case_db.unlink(missing_ok=True)
+    cc = connect_db(case_db)
+    add_sense(
+        cc,
+        "блок-станция",
+        "Блок-станция — это электростанция, не находящаяся в хозяйственном подчинении.",
+        "wiktionary:ru",
+    )
+    add_link(cc, "блок-станция", "блок-станция")
+    semantic_quality_pass(cc)
+    case_definition = cc.execute(
+        "SELECT definition FROM senses WHERE lemma='блок-станция'"
+    ).fetchone()[0]
+    assert case_definition.startswith("Электростанция")
+    cc.close(); case_db.unlink(missing_ok=True)
 
     # 4.6 QA queues: useful concise reference entries must not occupy the main
     # actionable review file. They are retained in separate informational files.
@@ -519,6 +684,10 @@ def main():
     assert (OUT / "QUALITY_REVIEW.tsv").exists()
     assert (OUT / "QUALITY_ONOMASTICS.tsv").exists()
     assert (OUT / "QUALITY_CONCISE.tsv").exists()
+    quality_report = json.loads((OUT / "QUALITY_REPORT.json").read_text(encoding="utf-8"))
+    assert quality_report["average_quality_score"] >= quality_report["raw_average_quality_score"]
+    assert quality_report["score_calibration"]["kind"] == "report-confidence-v1"
+    assert isinstance(quality_report.get("warning_counts"), dict)
     review_lines = (OUT / "QUALITY_REVIEW.tsv").read_text(encoding="utf-8").splitlines()
     assert review_lines and review_lines[0].startswith("score\twarnings\tword\tsource\tdefinition")
 
@@ -603,4 +772,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

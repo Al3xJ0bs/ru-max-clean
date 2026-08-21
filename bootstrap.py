@@ -2,8 +2,10 @@
 """Bootstrap/diagnostics for the RU Max Clean builder.
 
 The core builder uses only the Python standard library. Native packages below are
-optional accelerators; on an online Windows machine the launcher installs missing
-ones automatically, while offline mode keeps working with stdlib fallbacks.
+optional accelerators; on an online Windows machine the launcher installs the
+safe missing ones automatically, while offline mode keeps working with stdlib
+fallbacks. rapidgzip is deliberately not auto-installed because some Windows
+wheels make line-oriented Kaikki parsing slower.
 """
 from __future__ import annotations
 import argparse
@@ -63,10 +65,10 @@ def install_missing(*, offline: bool = False) -> list[str]:
     packages = info["packages"]
     required_missing = [PACKAGES[k] for k in PACKAGES if not packages.get(k)]
     optional_missing: list[str] = []
-    # rapidgzip has current Windows wheels and is safe to attempt on the user's
-    # CPython 3.14; it accelerates the 290-MB Kaikki gzip stream.
-    if not packages.get("rapidgzip"):
-        optional_missing.append(OPTIONAL_PACKAGES["rapidgzip"])
+    # Do not auto-install rapidgzip.  Several Windows wheels have very poor
+    # readline throughput on the line-oriented Kaikki dump and can turn a
+    # minute-scale build into an hours-long run.  The builder keeps a guarded
+    # opt-in for expert benchmarking via RU_MAX_ENABLE_RAPIDGZIP=1.
     # indexed_bzip2 wheels may lag behind a brand-new CPython release. On 3.14+
     # avoid a surprise MSVC source build; stdlib bz2 remains the fallback.
     can_try_indexed = not (os.name == "nt" and sys.version_info >= (3, 14))
@@ -105,6 +107,8 @@ def main() -> int:
     print(f"Python {info['python']} 64-bit | CPU threads: {info['cpu_threads']}")
     for name, status in info["packages"].items():
         note = status or "not installed (fallback will be used)"
+        if name == "rapidgzip" and status:
+            note = f"{status} (installed, disabled by default; opt-in only)"
         if name == "indexed_bzip2" and not status and os.name == "nt" and sys.version_info >= (3, 14):
             note = "not installed (no auto-install on CPython 3.14+; stdlib bz2 fallback)"
         print(f"  {name:14s}: {note}")

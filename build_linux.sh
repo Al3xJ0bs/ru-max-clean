@@ -8,6 +8,6 @@ PYTHON=${PYTHON:-python3}
   --download-dal \
   --download-wikipedia \
   --wikipedia-quality-upgrade \
-  --output-dir RU-Max-Clean
-"$PYTHON" validate_stardict.py RU-Max-Clean/ru-max-clean
-echo "Done. Copy RU-Max-Clean to koreader/data/dict/"
+  --output-dir RU-Dictionaries/RU-Max-Clean
+"$PYTHON" validate_stardict.py RU-Dictionaries/RU-Max-Clean/ru-max-clean
+echo "Done. Copy RU-Dictionaries/RU-Max-Clean to koreader/data/dict/"
