@@ -65,6 +65,13 @@ TEST_BOOK_FILES = {
     "test_books/RU-Max-Clean-Dictionary-Test-Book.fb2",
     "test_books/README_RU.txt",
 }
+# Runtime modules that must ship even when a developer builds directly from a
+# working tree before staging newly added files.  ``git ls-files`` is the
+# normal source of truth, but omitting an untracked import would produce a ZIP
+# that fails immediately after extraction.
+RELEASE_REQUIRED_FILES = {
+    "dictionary_layout.py",
+}
 ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
 
 
@@ -102,6 +109,12 @@ def package_files(root: Path) -> list[Path]:
     candidates = _git_files(root)
     if not candidates:
         candidates = [p for p in root.rglob("*") if p.is_file()]
+    else:
+        tracked_names = {p.relative_to(root).as_posix() for p in candidates}
+        for relative in RELEASE_REQUIRED_FILES:
+            path = root / relative
+            if path.exists() and relative not in tracked_names:
+                candidates.append(path)
     return sorted(
         (p for p in candidates if p.exists() and p.is_file() and not _excluded(p.relative_to(root))),
         key=lambda p: p.relative_to(root).as_posix(),
