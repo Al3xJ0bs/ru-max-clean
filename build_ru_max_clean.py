@@ -73,10 +73,7 @@ RESOLVE_STAGE_RULES = "resolve-v1"
 QUALITY_STAGE_RULES = "semantic-clean-v10"
 FORM_STAGE_RULES = "form-v1"
 EXPORT_STAGE_RULES = "stardict-export-v2"
-QUALITY_AUDIT_RULES = "quality-audit-v11"
-# Reporting-only calibration.  This is intentionally not part of the raw
-# rescue/semantic score; changing it must not alter text or source selection.
-QUALITY_REPORT_SCORE_RULES = "report-confidence-v1"
+QUALITY_AUDIT_RULES = "quality-audit-v12"
 
 
 def _builder_code_sha256() -> str:
@@ -1449,17 +1446,10 @@ def definition_quality_report_score(
     _normalized_text: str | None = None,
     _raw_score: int | None = None,
 ) -> int:
-    """Calibrate the *report-only* score without changing semantic decisions.
+    """Return the real heuristic score used by the quality audit.
 
-    ``definition_quality_score`` remains the conservative raw heuristic used by
-    source selection and Wikipedia rescue.  It intentionally starts ordinary
-    prose at 72, which is useful for comparing candidates but makes the global
-    report look as if every clean entry were mediocre.  The report score is a
-    confidence scale: a non-empty definition with no actionable warning is a
-    complete QA success (100), while the two explicitly informational classes
-    receive a small, honest deduction for being intentionally terse.  Any
-    actionable warning preserves the raw score, so calibration cannot hide a
-    problem or remove a row from QUALITY_REVIEW.
+    This compatibility shim intentionally performs no presentation calibration:
+    the report exposes the same score used for triage and source selection.
     """
     text = _normalized_text if _normalized_text is not None else _compact_quality_text(definition)
     if not text:
@@ -1468,21 +1458,7 @@ def definition_quality_report_score(
     raw_score = _raw_score if _raw_score is not None else definition_quality_score(
         lemma, text, source, flags, _normalized_text=text
     )
-    informational = {"onomastic_stub", "concise_gloss"}
-    actionable = flags - informational
-    if actionable:
-        return max(0, min(100, int(raw_score)))
-    # A few malformed tails can still evade a conservative detector.  Never
-    # turn an unflagged, very-low raw score into a perfect report score: it
-    # remains visible for later detector/fixture work instead of being hidden
-    # by calibration.
-    if not flags and raw_score < 60:
-        return max(0, min(100, int(raw_score)))
-    if "onomastic_stub" in flags:
-        return 96
-    if "concise_gloss" in flags:
-        return 98
-    return 100
+    return max(0, min(100, int(raw_score)))
 
 
 def clean_definition(value: object) -> str:
@@ -4619,9 +4595,7 @@ def write_quality_report(
     source_counts: dict[str, int] = {}
     total = 0
     score_sum = 0
-    raw_score_sum = 0
     score_buckets = {"0-49": 0, "50-69": 0, "70-84": 0, "85-100": 0}
-    raw_score_buckets = {"0-49": 0, "50-69": 0, "70-84": 0, "85-100": 0}
     review_heap: list[tuple[int, int, str, str, str, str]] = []
     onomastic_rows: list[tuple[int, str, str, str]] = []
     concise_rows: list[tuple[int, str, str, str]] = []
@@ -4647,7 +4621,6 @@ def write_quality_report(
             _normalized_text=compact,
             _raw_score=raw_score,
         )
-        raw_score_sum += raw_score
         score_sum += score
         if score < 50:
             score_buckets["0-49"] += 1
@@ -4657,15 +4630,6 @@ def write_quality_report(
             score_buckets["70-84"] += 1
         else:
             score_buckets["85-100"] += 1
-        if raw_score < 50:
-            raw_score_buckets["0-49"] += 1
-        elif raw_score < 70:
-            raw_score_buckets["50-69"] += 1
-        elif raw_score < 85:
-            raw_score_buckets["70-84"] += 1
-        else:
-            raw_score_buckets["85-100"] += 1
-
         informational_flags = {"onomastic_stub", "concise_gloss"}
         actionable_flags = [f for f in flags_for_definition if f not in informational_flags]
         if "onomastic_stub" in flags_for_definition:
@@ -4685,9 +4649,7 @@ def write_quality_report(
 
         # Do not let concise names/toponyms drown the actionable review. They are
         # visible separately in QUALITY_ONOMASTICS.tsv.
-        # Keep triage severity on the raw scale.  A report calibration must
-        # never make a warning disappear from QUALITY_REVIEW or reorder it as
-        # if the underlying definition had changed.
+        # Keep triage severity on the same real scale shown in the report.
         if review_limit > 0 and not informational_flags.intersection(flags_for_definition) and (actionable_flags or raw_score < 60):
             entry = (-raw_score, total, lemma, source, ",".join(actionable_flags), compact)
             if len(review_heap) < review_limit:
@@ -4703,15 +4665,7 @@ def write_quality_report(
         "definitions_audited": total,
         "average_quality_score": round(score_sum / total, 2) if total else 0,
         "score_buckets": score_buckets,
-        "raw_average_quality_score": round(raw_score_sum / total, 2) if total else 0,
-        "raw_score_buckets": raw_score_buckets,
-        "score_calibration": {
-            "kind": QUALITY_REPORT_SCORE_RULES,
-            "clean_definition": 100,
-            "concise_gloss": 98,
-            "onomastic_stub": 96,
-            "actionable_warning": "raw_score_preserved",
-        },
+        "score_scale": "raw-heuristic-v1",
         "warning_counts": dict(sorted(counts.items())),
         "informational_counts": dict(sorted(informational.items())),
         "display_overrides": overrides,
@@ -4752,7 +4706,6 @@ def write_quality_report(
         "=" * 58,
         f"Проверено определений: {total:,}".replace(",", " "),
         f"Средний эвристический балл: {report['average_quality_score']} / 100",
-        f"Средний исходный балл для triage: {report['raw_average_quality_score']} / 100",
         f"Естественных определений словоформ: {overrides:,}".replace(",", " "),
         f"Кандидатов на ручную проверку: {len(review_heap):,}".replace(",", " "),
         "",
@@ -4782,8 +4735,8 @@ def write_quality_report(
         "QUALITY_REVIEW.tsv содержит только реальные кандидаты на улучшение.",
         "QUALITY_ONOMASTICS.tsv отдельно содержит краткие справочные имена/топонимы.",
         "QUALITY_CONCISE.tsv отдельно содержит корректные короткие значения/синонимы.",
-        "Средний балл выше исходного: это безопасная report-only калибровка; "
-        "для строк с предупреждениями в QUALITY_REVIEW.tsv сохранён исходный балл.",
+        "Средний балл — это исходный эвристический балл, используемый для triage "
+        "и выбора кандидатов; определения при этом не изменяются самой проверкой.",
         "Предупреждения — подсказки для контроля, а не правила автоматического удаления.",
     ])
     (output_dir / "QUALITY_REPORT.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")

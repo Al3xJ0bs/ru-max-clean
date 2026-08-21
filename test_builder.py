@@ -448,21 +448,20 @@ def main():
         definition_quality_report_score,
         definition_quality_score,
     )
-    # Report calibration is deliberately separate from the raw heuristic used
-    # for source selection.  Clean prose can report as high-confidence without
-    # changing text, while an actionable warning keeps its raw severity.
+    # The public report must expose the real heuristic, not a presentation-only
+    # confidence score.
     clean_definition = "Органическое вещество, образующееся в клетках растений."
     clean_flags = definition_quality_flags("хлорофилл", clean_definition, "wiktionary:ru")
     clean_raw = definition_quality_score("хлорофилл", clean_definition, "wiktionary:ru", clean_flags)
     assert not clean_flags
-    assert clean_raw < definition_quality_report_score(
+    assert clean_raw == definition_quality_report_score(
         "хлорофилл", clean_definition, "wiktionary:ru", clean_flags, _raw_score=clean_raw
-    ) == 100
+    )
     concise_flags = definition_quality_flags("Александр", "мужское имя", "wiktionary:ru")
     assert concise_flags == ["onomastic_stub"]
     assert definition_quality_report_score(
         "Александр", "мужское имя", "wiktionary:ru", concise_flags
-    ) == 96
+    ) == definition_quality_score("Александр", "мужское имя", "wiktionary:ru", concise_flags)
     warning_text = "О доме"
     warning_flags = definition_quality_flags("дом", warning_text, "wiktionary:ru")
     warning_raw = definition_quality_score("дом", warning_text, "wiktionary:ru", warning_flags)
@@ -470,8 +469,7 @@ def main():
     assert definition_quality_report_score(
         "дом", warning_text, "wiktionary:ru", warning_flags, _raw_score=warning_raw
     ) == warning_raw
-    # An unflagged but very-low raw score is kept visible until its detector is
-    # improved; calibration must not turn likely residue into a false 100.
+    # An unflagged but very-low raw score must remain visible in the report.
     assert definition_quality_report_score(
         "термтест", "Женщина)", "wiktionary:ru", [], _raw_score=42
     ) == 42
@@ -685,8 +683,10 @@ def main():
     assert (OUT / "QUALITY_ONOMASTICS.tsv").exists()
     assert (OUT / "QUALITY_CONCISE.tsv").exists()
     quality_report = json.loads((OUT / "QUALITY_REPORT.json").read_text(encoding="utf-8"))
-    assert quality_report["average_quality_score"] >= quality_report["raw_average_quality_score"]
-    assert quality_report["score_calibration"]["kind"] == "report-confidence-v1"
+    assert quality_report["average_quality_score"] < 90
+    assert quality_report["score_scale"] == "raw-heuristic-v1"
+    assert "raw_average_quality_score" not in quality_report
+    assert "score_calibration" not in quality_report
     assert isinstance(quality_report.get("warning_counts"), dict)
     review_lines = (OUT / "QUALITY_REVIEW.tsv").read_text(encoding="utf-8").splitlines()
     assert review_lines and review_lines[0].startswith("score\twarnings\tword\tsource\tdefinition")
