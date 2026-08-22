@@ -185,28 +185,40 @@ class KnownKeyMatcher:
 
 def iter_stardict_keys(index_path: Path) -> Iterator[str]:
     """Stream keys from a StarDict 2.4.2 ``.idx`` file without loading it."""
+    # ``.idx`` contains ``UTF-8 key + NUL + 8-byte metadata`` records.  The
+    # former byte-at-a-time reader made an ordinary coverage scan over the
+    # 200 MiB core index take several minutes.  Buffered chunks preserve the
+    # streaming/memory-bounded behaviour while avoiding millions of tiny I/O
+    # calls.  Keep an incomplete record in ``pending`` for the next chunk.
     with index_path.open("rb") as stream:
-        while True:
-            raw = bytearray()
+        pending = b""
+        while chunk := stream.read(1024 * 1024):
+            data = pending + chunk
+            offset = 0
             while True:
-                byte = stream.read(1)
-                if not byte:
-                    return
-                if byte == b"\0":
+                nul = data.find(b"\0", offset)
+                if nul < 0 or len(data) < nul + 9:
+                    pending = data[offset:]
                     break
-                raw.extend(byte)
-            meta = stream.read(8)
-            if len(meta) != 8:
-                return
-            try:
-                yield raw.decode("utf-8")
-            except UnicodeDecodeError:
-                # A malformed external index must not abort a coverage scan.
-                continue
+                raw = data[offset:nul]
+                offset = nul + 9
+                try:
+                    yield raw.decode("utf-8")
+                except UnicodeDecodeError:
+                    # A malformed external index must not abort a coverage scan.
+                    continue
+        # A partial final record is invalid; ignore it like the old reader.
 
 
-def matcher_from_stardict(index_path: Path, observed: Iterable[str]) -> KnownKeyMatcher:
-    """Find only observed words in a large index, keeping memory bounded."""
+def matcher_from_stardict(index_path: Path, observed: Iterable[str], *,
+                          collect_short_phrases: bool = False) -> KnownKeyMatcher:
+    """Find observed keys in a large index without loading all its entries.
+
+    ``collect_short_phrases`` keeps two-to-four-word keys as well.  It is used
+    by the book-coverage tool after it has collected only single tokens: that
+    avoids materialising every possible n-gram from a multi-million-token
+    corpus while preserving phrase coverage exactly.
+    """
     wanted = {normalize_lookup(token) for token in observed if normalize_lookup(token)}
     found: set[str] = set()
     if not wanted:
@@ -215,8 +227,10 @@ def matcher_from_stardict(index_path: Path, observed: Iterable[str]) -> KnownKey
         normal = normalize_lookup(key)
         if normal in wanted:
             found.add(normal)
-            if len(found) == len(wanted):
+            if not collect_short_phrases and len(found) == len(wanted):
                 break
+        elif collect_short_phrases and 1 <= normal.count(" ") <= 3:
+            found.add(normal)
     return KnownKeyMatcher(found)
 
 

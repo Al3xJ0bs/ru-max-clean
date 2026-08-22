@@ -9,6 +9,12 @@ forms of address, titles, and common expressions in Russian classical prose. It
 is deliberately separate from the Latin packs because short French function
 words can collide with Latin keys.
 
+german_literary.tsv is a separate German companion layer for dialogue,
+military commands, forms of address, and short quotations.  Its initial set is
+grounded in the supplied Russian editions of Ha\u0161ek, Kafka, and Goethe; it
+also stays separate because common German particles should never become entries
+in the Russian core dictionary.
+
 literary_names.tsv contains curated characters, historical figures, and places
 from the literary corpus. fantasy_terms.tsv contains short explanations of
 world-specific fantasy vocabulary. Both layers remain optional and are kept

@@ -67,7 +67,10 @@ from version_info import BUILDER_VERSION
 
 # These versions are deliberately independent from BUILDER_VERSION. A future
 # presentation/reporting-only release can therefore reuse expensive parsed stages.
-LEXICAL_STAGE_RULES = "lexical-v2-sources"
+# v3 adds Kaikki hard-redirect aliases and strips its documented ``^△``
+# form marker.  Bump this independently so existing lexical caches are rebuilt
+# once instead of silently preserving the missing word forms.
+LEXICAL_STAGE_RULES = "lexical-v3-hard-redirect-forms"
 WIKIPEDIA_STAGE_RULES = "wikipedia-v1"
 RESOLVE_STAGE_RULES = "resolve-v1"
 QUALITY_STAGE_RULES = "semantic-clean-v10"
@@ -113,6 +116,11 @@ COMMIT_EVERY = 250_000
 # Python set.
 KAIKKI_BATCH_RECORDS = 25_000
 KAIKKI_BATCH_ROWS = 180_000
+# Wikidata's Russian Lexeme entries carry several spelling/form aliases each.
+# Buffering those rows makes the hot path one sorted SQLite bulk write instead
+# of a Python ``add_link()``/``executemany()`` round-trip for every form.  The
+# bound also caps the small pending-alias lookup set used by fallback mode.
+WIKIDATA_LINK_BATCH_ROWS = 180_000
 
 
 def json_loads_fast(data):
@@ -363,6 +371,14 @@ GRAMMAR_TEXT_RE = re.compile(
 # grammatical sentence from the popup.  The patterns are deliberately narrow so
 # lexical definitions beginning with words such as "Форма" remain untouched.
 FORM_TARGET_WORD = r"[A-Za-zА-Яа-яЁёІіѢѣѲѳѴѵ]+(?:-[A-Za-zА-Яа-яЁёІіѢѣѲѳѴѵ]+)*"
+FORM_TARGET_PHRASE_RE = re.compile(rf"{FORM_TARGET_WORD}(?:\s+{FORM_TARGET_WORD}){{0,3}}$")
+# Hard redirects do not carry a language tag.  Restrict their automatic import
+# to Russian/Cyrillic forms so an unrelated foreign or Wikimedia namespace
+# redirect cannot become a key in the Russian core.
+CYRILLIC_FORM_TARGET_WORD = r"[А-Яа-яЁёІіѢѣѲѳѴѵ]+(?:-[А-Яа-яЁёІіѢѣѲѳѴѵ]+)*"
+CYRILLIC_FORM_TARGET_PHRASE_RE = re.compile(
+    rf"{CYRILLIC_FORM_TARGET_WORD}(?:\s+{CYRILLIC_FORM_TARGET_WORD}){{0,3}}$"
+)
 TEXTUAL_FORM_OF_RES = (
     re.compile(
         rf"^\s*(?:(?:страд(?:ат(?:ельн(?:ое|ый|ая)?)?)?|действ(?:ительн(?:ое|ый|ая)?)?)\.?\s+)?"
@@ -2167,6 +2183,101 @@ class _KaikkiBatch:
         return inserted_senses
 
 
+class _WikidataLinkBatch:
+    """Bounded writer for Wikidata aliases while preserving fallback semantics.
+
+    Wikidata must decide whether a lexeme is already defined *before* it adds
+    its fallback gloss.  Deferring all aliases until the end would incorrectly
+    hide an alias emitted by an earlier record from that decision.  This class
+    therefore retains only the currently unflushed aliases whose target has a
+    real sense; ``has_definition_for_key`` consults that bounded set in addition
+    to SQLite.  Once a sorted batch is inserted, SQLite again becomes the
+    source of truth and the temporary set is discarded.
+    """
+
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        casefold_aliases: bool,
+        yo_aliases: bool,
+        accent_aliases: bool,
+    ) -> None:
+        self.conn = conn
+        self.casefold_aliases = casefold_aliases
+        self.yo_aliases = yo_aliases
+        self.accent_aliases = accent_aliases
+        self.links: list[tuple[str, str]] = []
+        self.pending_defined_aliases: set[str] = set()
+        # A target can acquire its first direct sense later in the same batch.
+        # Retain reverse aliases until flush so they immediately become visible
+        # to fallback checks at that point (important for --wikidata-merge).
+        self.pending_aliases_by_target: dict[str, set[str]] = {}
+
+    def _aliases(self, key: str) -> tuple[str, ...]:
+        normalized = normalize_key(key)
+        # Keep the public helper here instead of the Kaikki fast path: this
+        # source's labels and forms have historically been less uniform and
+        # ``add_link`` validates exactly through this helper.
+        return tuple(_alias_candidates(
+            normalized,
+            self.casefold_aliases,
+            self.yo_aliases,
+            self.accent_aliases,
+        ))
+
+    def has_definition_for_key(self, key: str) -> bool:
+        """Mirror the public lookup test for aliases not flushed yet."""
+        if not is_lookup_key(key):
+            return False
+        normalized = normalize_key(key)
+        candidates = {normalized, normalized.casefold()}
+        y = yo_alias(normalized)
+        if y:
+            candidates.add(y.casefold())
+        accentless = strip_combining_alias(normalized)
+        if accentless:
+            candidates.add(accentless.casefold())
+        if self.pending_defined_aliases.intersection(candidates):
+            return True
+        return has_definition_for_key(self.conn, normalized)
+
+    def link(self, key: str, lemma: str, *, target_has_direct_sense: bool) -> None:
+        """Queue exactly the aliases ``add_link`` would write for this row."""
+        if not is_lookup_key(key) or not is_lookup_key(lemma):
+            return
+        lemma = normalize_key(lemma)
+        aliases = self._aliases(key)
+        self.links.extend((alias, lemma) for alias in aliases)
+        if target_has_direct_sense:
+            self.pending_defined_aliases.update(aliases)
+        else:
+            self.pending_aliases_by_target.setdefault(lemma, set()).update(aliases)
+
+    def mark_target_direct(self, lemma: str) -> None:
+        """Expose earlier queued aliases once ``lemma`` gains a direct sense."""
+        if not is_lookup_key(lemma):
+            return
+        self.pending_defined_aliases.update(
+            self.pending_aliases_by_target.pop(normalize_key(lemma), ())
+        )
+
+    def should_flush(self) -> bool:
+        return len(self.links) >= WIKIDATA_LINK_BATCH_ROWS
+
+    def flush(self) -> None:
+        if self.links:
+            # Primary key order gives the WITHOUT ROWID links table locality and
+            # avoids the progressive slowdown seen with random per-form inserts.
+            self.conn.executemany(
+                "INSERT OR IGNORE INTO links(key, lemma) VALUES (?, ?)",
+                sorted(self.links),
+            )
+        self.links.clear()
+        self.pending_defined_aliases.clear()
+        self.pending_aliases_by_target.clear()
+
+
 def target_words(sense: dict) -> list[str]:
     result: list[str] = []
     for field in ("form_of", "alt_of"):
@@ -2187,6 +2298,48 @@ def target_words(sense: dict) -> list[str]:
     return result
 
 
+KAIKKI_FORM_NOTE_RE = re.compile(r"\^△(?=$|[,;])")
+
+
+def kaikki_form_variants(value: object) -> tuple[str, ...]:
+    """Return safe lookup forms from a Wiktextract ``forms`` value.
+
+    Kaikki occasionally annotates an otherwise ordinary Russian form with its
+    display-only ``^△`` marker (for example ``ли́стья^△`` and
+    ``хо́чется^△``).  Passing that literal text into the lookup graph makes the
+    useful spelling unreachable.  Strip only this documented terminal marker;
+    do not try to interpret parentheses, usage labels, or other source notes.
+
+    A rare source row contains two individually marked forms separated by a
+    comma (``её^△, неё^△,``).  Split it only after the marker has been removed
+    and only when every resulting piece is a standalone word.  Stress is kept
+    here; the established accent-alias machinery creates the ordinary lookup
+    spelling without changing the canonical source form.
+    """
+    if not isinstance(value, str):
+        return ()
+    text = normalize_key(value)
+    if not text:
+        return ()
+    text = KAIKKI_FORM_NOTE_RE.sub("", text).strip(" ,;")
+    if not text:
+        return ()
+    variants: list[str] = []
+    for part in re.split(r"\s*,\s*", text):
+        candidate = _normalized_lookup_key(part)
+        if candidate is None:
+            continue
+        # The source can contain explanatory alternatives such as
+        # ``есть (есмь^*)``.  They are not independent word forms.  Validate
+        # against the stressless spelling, because combining stress is a real
+        # part of otherwise valid Kaikki forms.
+        plain = strip_combining_alias(candidate) or candidate
+        if not FORM_TARGET_PHRASE_RE.fullmatch(plain):
+            continue
+        variants.append(candidate)
+    return tuple(dict.fromkeys(variants))
+
+
 def sense_is_grammar_only(sense: dict) -> bool:
     tags = {str(t).casefold() for t in (sense.get("tags") or [])}
     return bool(sense.get("form_of") or sense.get("alt_of") or {"form-of", "alt-of"} & tags)
@@ -2203,7 +2356,7 @@ def process_kaikki(
     accent_aliases: bool,
     max_records: int = 0,
 ) -> dict[str, int]:
-    processed = accepted = definitions = redirects = form_links = 0
+    processed = accepted = definitions = redirects = hard_redirects = form_links = 0
     batch = _KaikkiBatch(
         conn,
         casefold_aliases=casefold_aliases,
@@ -2225,7 +2378,13 @@ def process_kaikki(
             if processed % KAIKKI_BATCH_RECORDS == 0:
                 definitions += batch.flush()
                 conn.commit()
-            if lang_prefilter is not None and not lang_prefilter.search(line):
+            # Kaikki hard redirects are schema-level rows without ``lang_code``:
+            # ``{\"title\": \"взялся\", \"redirect\": \"взяться\", ...}``.
+            # They are genuine spelling/form aliases, and resolve_links() later
+            # removes any whose target has no accepted lexical definition.
+            # Keep the inexpensive byte prefilter for all ordinary entries.
+            may_be_hard_redirect = b'"hard-redirect"' in line
+            if lang_prefilter is not None and not lang_prefilter.search(line) and not may_be_hard_redirect:
                 continue
             try:
                 obj = json_loads_fast(line)
@@ -2233,9 +2392,27 @@ def process_kaikki(
                 if not is_json_decode_error(exc):
                     raise
                 continue
+            if obj.get("pos") == "hard-redirect":
+                title = _normalized_lookup_key(obj.get("title") or obj.get("word"))
+                target = _normalized_lookup_key(obj.get("redirect"))
+                if (
+                    title is not None
+                    and target is not None
+                    and CYRILLIC_FORM_TARGET_PHRASE_RE.fullmatch(title)
+                    and CYRILLIC_FORM_TARGET_PHRASE_RE.fullmatch(target)
+                ):
+                    batch.link(title, target)
+                    hard_redirects += 1
+                batch.records += 1
+                if batch.should_flush():
+                    definitions += batch.flush()
+                continue
             if obj.get("lang_code") not in langs:
                 continue
-            word = _normalized_lookup_key(obj.get("word"))
+            # ``word`` is the normal Kaikki schema field.  Accept ``title`` as
+            # a fallback too: the producer has emitted that spelling in some
+            # revisions, and ignoring it silently drops an entire source pass.
+            word = _normalized_lookup_key(obj.get("word") or obj.get("title"))
             if word is None:
                 continue
             accepted += 1
@@ -2294,8 +2471,7 @@ def process_kaikki(
                             continue
                     else:
                         form = form_obj
-                    form = _normalized_lookup_key(form)
-                    if form is not None:
+                    for form in kaikki_form_variants(form):
                         batch.link(
                             form, word,
                         )
@@ -2321,6 +2497,7 @@ def process_kaikki(
         "definitions_added": definitions,
         "form_or_alt_links_seen": form_links,
         "redirects_seen": redirects,
+        "hard_redirects_seen": hard_redirects,
     }
 
 
@@ -2553,6 +2730,12 @@ def process_wikidata_lexemes(
 ) -> dict[str, int]:
     """Import Russian Wikidata Lexeme glosses (CC0) and their written forms."""
     processed = russian = glosses_added = forms_added = skipped_existing = no_ru_gloss = 0
+    link_batch = _WikidataLinkBatch(
+        conn,
+        casefold_aliases=casefold_aliases,
+        yo_aliases=yo_aliases,
+        accent_aliases=accent_aliases,
+    )
     if str(path).endswith(".bz2"):
         fh_ctx = open_bz2_binary_fast(path)
     elif str(path).endswith(".gz"):
@@ -2581,6 +2764,7 @@ def process_wikidata_lexemes(
             if processed % 25_000 == 0:
                 progress_render("Wikidata Lexemes", processed, progress_expected("wikidata_entities", processed), unit="entities")
             if processed % COMMIT_EVERY == 0:
+                link_batch.flush()
                 conn.commit()
             if not russian_language_marker.search(raw):
                 continue
@@ -2597,7 +2781,7 @@ def process_wikidata_lexemes(
                 continue
             russian += 1
             lemma = lemmas[0]
-            exists = has_definition_for_key(conn, lemma)
+            exists = link_batch.has_definition_for_key(lemma)
             added_here = False
             senses = obj.get("senses")
             if isinstance(senses, dict):
@@ -2625,11 +2809,25 @@ def process_wikidata_lexemes(
             # Alternative Russian lemmas (including historical spelling variants)
             # are aliases, never separate definition cards.
             if exists or added_here:
-                add_link(conn, lemma, lemma, casefold_aliases=casefold_aliases,
-                         yo_aliases=yo_aliases, accent_aliases=accent_aliases)
+                # ``added_here`` is necessarily a direct sense.  For a pre-
+                # existing key, ask once whether this exact target has its own
+                # sense before letting unflushed aliases satisfy a later
+                # fallback lookup; this matches the links+senses JOIN used by
+                # ``has_definition_for_key``.
+                target_has_direct_sense = added_here or has_direct_sense(conn, lemma)
+                if target_has_direct_sense:
+                    link_batch.mark_target_direct(lemma)
+                link_batch.link(
+                    lemma,
+                    lemma,
+                    target_has_direct_sense=target_has_direct_sense,
+                )
                 for alias in lemmas[1:]:
-                    add_link(conn, alias, lemma, casefold_aliases=casefold_aliases,
-                             yo_aliases=yo_aliases, accent_aliases=accent_aliases)
+                    link_batch.link(
+                        alias,
+                        lemma,
+                        target_has_direct_sense=target_has_direct_sense,
+                    )
                 if include_forms:
                     forms = obj.get("forms")
                     if isinstance(forms, dict):
@@ -2639,9 +2837,15 @@ def process_wikidata_lexemes(
                             if not isinstance(form_obj, dict):
                                 continue
                             for form in _russian_text_values(form_obj.get("representations")):
-                                add_link(conn, form, lemma, casefold_aliases=casefold_aliases,
-                                         yo_aliases=yo_aliases, accent_aliases=accent_aliases)
+                                link_batch.link(
+                                    form,
+                                    lemma,
+                                    target_has_direct_sense=target_has_direct_sense,
+                                )
                                 forms_added += 1
+            if link_batch.should_flush():
+                link_batch.flush()
+    link_batch.flush()
     conn.commit()
     _PROGRESS.record("wikidata_entities", processed)
     progress_finish("Wikidata Lexemes", processed, processed, unit="entities")

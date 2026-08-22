@@ -52,6 +52,10 @@ PACK_METADATA: dict[str, dict[str, str]] = {
         "title": "Французская лексика в литературе",
         "language": "fr", "kind": "French words and expressions in Russian literary prose",
     },
+    "german_literary": {
+        "title": "Немецкая лексика в литературе",
+        "language": "de", "kind": "German words, commands, and expressions in translated literary prose",
+    },
     "literary_names": {
         "title": "Литературные имена и названия",
         "language": "ru", "kind": "proper names and places from Russian literary reading",

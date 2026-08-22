@@ -84,7 +84,7 @@ class Range429Handler(http.server.BaseHTTPRequestHandler):
 
 def main():
     assert USER_AGENT.startswith("Mozilla/5.0 ")
-    assert "RU-Max-Clean/4.9.6" in USER_AGENT
+    assert "RU-Max-Clean/5.0.0" in USER_AGENT
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         with socketserver.TCPServer(("127.0.0.1", 0), Handler) as srv:
@@ -180,4 +180,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

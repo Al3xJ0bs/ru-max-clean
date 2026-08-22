@@ -23,6 +23,10 @@ jobs:
           python -X utf8 test_source_manager.py
           python -X utf8 test_stage_cache.py
           python -X utf8 test_package_builder.py
+          python -X utf8 test_launcher.py
+          python -X utf8 test_output_layout.py
+          python -X utf8 test_book_coverage.py
+          python -X utf8 test_scan_book_coverage.py
           python -m compileall -q .
 
   linux-smoke:
@@ -39,4 +43,8 @@ jobs:
           python -X utf8 test_source_manager.py
           python -X utf8 test_stage_cache.py
           python -X utf8 test_package_builder.py
+          python -X utf8 test_launcher.py
+          python -X utf8 test_output_layout.py
+          python -X utf8 test_book_coverage.py
+          python -X utf8 test_scan_book_coverage.py
           python -m compileall -q .

@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tarfile
 import zlib
+import gzip
 from pathlib import Path
 
 from build_ru_max_clean import _rapidgzip_enabled, is_lookup_key
@@ -224,7 +225,9 @@ def main():
     from build_ru_max_clean import (
         _quality_normalize_definition, semantic_quality_pass, wikipedia_quality_rescue,
         connect_db, ensure_runtime_indexes, add_sense, add_link, write_quality_report,
-        _alias_candidates, _quality_rewrite_about_phrase,
+        _alias_candidates, _quality_rewrite_about_phrase, kaikki_form_variants,
+        _russian_text_values, has_definition_for_key,
+        process_kaikki, process_wikidata_lexemes, resolve_links,
     )
     index_db = ROOT / "_deferred_indexes.sqlite3"
     index_db.unlink(missing_ok=True)
@@ -247,6 +250,307 @@ def main():
     }
     assert {"senses_lemma_idx", "links_lemma_idx", "form_hints_target_idx"} <= after_indexes
     ic.close(); index_db.unlink(missing_ok=True)
+
+    # Current Kaikki data has two source-level forms that must not be confused
+    # with dictionary text: terminal ``^△`` markers on ordinary forms, and
+    # language-less ``hard-redirect`` rows.  Both are real graph evidence, not
+    # guessed Russian inflection.  The former covers ``хочется``/``листья``;
+    # the latter covers short forms such as ``счастлив`` and ``взялся``.
+    assert kaikki_form_variants("хо́чется^△") == ("хо́чется",)
+    assert kaikki_form_variants("её^△, неё^△,") == ("её", "неё")
+    assert kaikki_form_variants("есть (есмь^*)") == ()
+    morphology_db = ROOT / "_kaikki_morphology.sqlite3"
+    morphology_source = ROOT / "_kaikki_morphology.jsonl.gz"
+    morphology_db.unlink(missing_ok=True)
+    morphology_source.unlink(missing_ok=True)
+    morphology_rows = [
+        {
+            "word": "хотеться", "lang_code": "ru", "senses": [
+                {"glosses": ["Иметь желание или потребность в чём-либо."]}
+            ], "forms": [{"form": "хо́чется^△"}],
+        },
+        {
+            "word": "лист", "lang_code": "ru", "senses": [
+                {"glosses": ["Орган растения в виде тонкой пластинки."]}
+            ], "forms": [{"form": "ли́стья^△"}],
+        },
+        {
+            "word": "счастливый", "lang_code": "ru", "senses": [
+                {"glosses": ["Испытывающий счастье."]}
+            ],
+        },
+        {
+            "word": "взяться", "lang_code": "ru", "senses": [
+                {"glosses": ["Приняться за какое-либо дело."]}
+            ],
+        },
+        {"title": "счастлив", "redirect": "счастливый", "pos": "hard-redirect"},
+        {"title": "взялся", "redirect": "взяться", "pos": "hard-redirect"},
+        {"title": "служебный", "redirect": "Викисловарь:Шаблон", "pos": "hard-redirect"},
+    ]
+    morphology_source.write_bytes(gzip.compress(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in morphology_rows).encode("utf-8"),
+        mtime=0,
+    ))
+    mc = connect_db(morphology_db)
+    try:
+        morphology_stats = process_kaikki(
+            morphology_source, mc, {"ru"}, include_forms=True,
+            casefold_aliases=True, yo_aliases=True, accent_aliases=True,
+        )
+        assert morphology_stats["hard_redirects_seen"] == 2
+        resolve_links(mc)
+        expected = {
+            "хочется": "хотеться", "листья": "лист",
+            "счастлив": "счастливый", "взялся": "взяться",
+        }
+        for form, target in expected.items():
+            assert (target,) in mc.execute(
+                "SELECT lemma FROM links WHERE key=?", (form,)
+            ).fetchall(), (form, target)
+        assert not mc.execute(
+            "SELECT 1 FROM links WHERE key='служебный'"
+        ).fetchone()
+    finally:
+        mc.close()
+        morphology_db.unlink(missing_ok=True)
+        morphology_source.unlink(missing_ok=True)
+
+    # Wikidata links are bulk-written, but fallback-only gloss selection must
+    # still see an alternate spelling emitted by the immediately preceding
+    # record. This caught the easy-to-miss regression where deferred aliases
+    # caused a second, lower-priority Wikidata definition card to leak in.
+    wikidata_batch_db = ROOT / "_wikidata_link_batch.sqlite3"
+    wikidata_batch_source = ROOT / "_wikidata_link_batch.jsonl"
+    wikidata_batch_db.unlink(missing_ok=True)
+    wikidata_batch_source.unlink(missing_ok=True)
+    wikidata_rows = [
+        {
+            "type": "lexeme", "language": "Q7737",
+            "lemmas": {
+                "ru": {"language": "ru", "value": "тест"},
+                "ru-x-old": {"language": "ru-x-old", "value": "тэст"},
+            },
+            "senses": [{
+                "glosses": {"ru": {"language": "ru", "value": "Проверочная запись."}},
+            }],
+            "forms": [{
+                "representations": {"ru": {"language": "ru", "value": "теста"}},
+            }],
+        },
+        {
+            "type": "lexeme", "language": "Q7737",
+            "lemmas": {"ru": {"language": "ru", "value": "тэст"}},
+            "senses": [{
+                "glosses": {"ru": {"language": "ru", "value": "Не должен стать вторым определением."}},
+            }],
+        },
+    ]
+    wikidata_batch_source.write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in wikidata_rows),
+        encoding="utf-8",
+    )
+    wc = connect_db(wikidata_batch_db)
+    try:
+        wikidata_stats = process_wikidata_lexemes(
+            wikidata_batch_source, wc, fallback_only=True, include_forms=True,
+            casefold_aliases=True, yo_aliases=True, accent_aliases=True,
+        )
+        assert wikidata_stats["glosses_added"] == 1
+        assert wikidata_stats["forms_linked"] == 1
+        assert wikidata_stats["skipped_existing_lemmas"] == 1
+        assert wc.execute("SELECT definition FROM senses WHERE lemma='тест'").fetchone()[0] == "Проверочная запись."
+        assert wc.execute("SELECT COUNT(*) FROM senses WHERE lemma='тэст'").fetchone()[0] == 0
+        assert wc.execute("SELECT 1 FROM links WHERE key='тэст' AND lemma='тест'").fetchone()
+        assert wc.execute("SELECT 1 FROM links WHERE key='теста' AND lemma='тест'").fetchone()
+    finally:
+        wc.close()
+        wikidata_batch_db.unlink(missing_ok=True)
+        wikidata_batch_source.unlink(missing_ok=True)
+
+    # --wikidata-merge has a subtler ordering case: an old A -> Б link can
+    # make the first Lexeme for A eligible for aliases before A itself receives
+    # a direct Wikidata sense. Once that sense arrives, the earlier alias Икс
+    # must immediately count as defined for the next record, even before the
+    # bulk writer flushes its current batch.
+    wikidata_merge_db = ROOT / "_wikidata_link_batch_merge.sqlite3"
+    wikidata_merge_source = ROOT / "_wikidata_link_batch_merge.jsonl"
+    wikidata_merge_db.unlink(missing_ok=True)
+    wikidata_merge_source.unlink(missing_ok=True)
+    wikidata_merge_rows = [
+        {
+            "type": "lexeme", "language": "Q7737",
+            "lemmas": {
+                "ru": {"language": "ru", "value": "а"},
+                "ru-x-old": {"language": "ru-x-old", "value": "икс"},
+            },
+            "senses": [],
+        },
+        {
+            "type": "lexeme", "language": "Q7737",
+            "lemmas": {"ru": {"language": "ru", "value": "а"}},
+            "senses": [{
+                "glosses": {"ru": {"language": "ru", "value": "Первая буква алфавита."}},
+            }],
+        },
+        {
+            "type": "lexeme", "language": "Q7737",
+            "lemmas": {"ru": {"language": "ru", "value": "икс"}},
+            "senses": [],
+        },
+    ]
+    wikidata_merge_source.write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in wikidata_merge_rows),
+        encoding="utf-8",
+    )
+    wmc = connect_db(wikidata_merge_db)
+    try:
+        add_sense(wmc, "бэ", "Вторая буква алфавита.", "test")
+        add_link(wmc, "бэ", "бэ")
+        add_link(wmc, "а", "бэ")
+        wikidata_stats = process_wikidata_lexemes(
+            wikidata_merge_source, wmc, fallback_only=False, include_forms=False,
+            casefold_aliases=True, yo_aliases=True, accent_aliases=True,
+        )
+        assert wikidata_stats["glosses_added"] == 1
+        assert wikidata_stats["skipped_existing_lemmas"] == 0
+        assert wmc.execute("SELECT 1 FROM links WHERE key='икс' AND lemma='а'").fetchone()
+        assert wmc.execute("SELECT 1 FROM links WHERE key='икс' AND lemma='икс'").fetchone()
+    finally:
+        wmc.close()
+        wikidata_merge_db.unlink(missing_ok=True)
+        wikidata_merge_source.unlink(missing_ok=True)
+
+    # Keep the bulk implementation bit-for-bit compatible with the former
+    # immediate writer across every public alias flag. The compact reference is
+    # deliberately independent of the batch class and mirrors the previous
+    # source-loop ordering, so it catches a priority/fallback change rather
+    # than merely retesting the new implementation against itself.
+    def legacy_wikidata_rows(conn, rows, *, fallback_only, include_forms,
+                             casefold_aliases, yo_aliases, accent_aliases):
+        stats = {
+            "entities_processed": 0, "russian_lexemes": 0,
+            "glosses_added": 0, "forms_linked": 0,
+            "skipped_existing_lemmas": 0, "without_russian_gloss": 0,
+        }
+        for obj in rows:
+            stats["entities_processed"] += 1
+            if obj.get("type") not in (None, "lexeme") or obj.get("language") != "Q7737":
+                continue
+            lemmas = _russian_text_values(obj.get("lemmas"))
+            if not lemmas:
+                continue
+            stats["russian_lexemes"] += 1
+            lemma = lemmas[0]
+            exists = has_definition_for_key(conn, lemma)
+            added_here = False
+            senses = obj.get("senses")
+            if isinstance(senses, dict):
+                senses = list(senses.values())
+            if not isinstance(senses, list):
+                senses = []
+            found_gloss = False
+            for sense in senses:
+                if not isinstance(sense, dict):
+                    continue
+                glosses = _russian_text_values(sense.get("glosses"), lookup_keys=False)
+                if glosses:
+                    found_gloss = True
+                if fallback_only and exists:
+                    continue
+                for gloss in glosses:
+                    if add_sense(conn, lemma, gloss, "wikidata-lexeme"):
+                        stats["glosses_added"] += 1
+                        added_here = True
+            if exists and fallback_only:
+                stats["skipped_existing_lemmas"] += 1
+            elif not found_gloss:
+                stats["without_russian_gloss"] += 1
+            if exists or added_here:
+                add_link(conn, lemma, lemma, casefold_aliases=casefold_aliases,
+                         yo_aliases=yo_aliases, accent_aliases=accent_aliases)
+                for alias in lemmas[1:]:
+                    add_link(conn, alias, lemma, casefold_aliases=casefold_aliases,
+                             yo_aliases=yo_aliases, accent_aliases=accent_aliases)
+                if include_forms:
+                    forms = obj.get("forms")
+                    if isinstance(forms, dict):
+                        forms = list(forms.values())
+                    if isinstance(forms, list):
+                        for form_obj in forms:
+                            if not isinstance(form_obj, dict):
+                                continue
+                            for form in _russian_text_values(form_obj.get("representations")):
+                                add_link(conn, form, lemma, casefold_aliases=casefold_aliases,
+                                         yo_aliases=yo_aliases, accent_aliases=accent_aliases)
+                                stats["forms_linked"] += 1
+        conn.commit()
+        return stats
+
+    wikidata_compare_source = ROOT / "_wikidata_link_batch_compare.jsonl"
+    wikidata_compare_source.unlink(missing_ok=True)
+    wikidata_compare_rows = [
+        {
+            "type": "lexeme", "language": "Q7737",
+            "lemmas": {"ru": {"language": "ru", "value": "Ёлка"}},
+            "senses": [{"glosses": {"ru": {"language": "ru", "value": "Хвойное дерево."}}}],
+            "forms": [
+                {"representations": {"ru": {"language": "ru", "value": "ёлке"}}},
+                {"representations": {"ru": {"language": "ru", "value": "е́лке"}}},
+            ],
+        },
+        {
+            "type": "lexeme", "language": "Q7737",
+            "lemmas": {"ru": {"language": "ru", "value": "ёлка"}},
+            "senses": [{"glosses": {"ru": {"language": "ru", "value": "Не должен заменить первое значение."}}}],
+        },
+        {
+            "type": "lexeme", "language": "Q7737",
+            "lemmas": {"ru": {"language": "ru", "value": "елка"}},
+            "senses": [{"glosses": {"ru": {"language": "ru", "value": "Значение зависит от флагов алиаса."}}}],
+        },
+    ]
+    wikidata_compare_source.write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in wikidata_compare_rows),
+        encoding="utf-8",
+    )
+    try:
+        for fallback_only in (False, True):
+            for include_forms in (False, True):
+                for casefold_aliases in (False, True):
+                    for yo_aliases in (False, True):
+                        for accent_aliases in (False, True):
+                            ref_conn = connect_db(Path(":memory:"))
+                            batch_conn = connect_db(Path(":memory:"))
+                            try:
+                                flags = {
+                                    "fallback_only": fallback_only,
+                                    "include_forms": include_forms,
+                                    "casefold_aliases": casefold_aliases,
+                                    "yo_aliases": yo_aliases,
+                                    "accent_aliases": accent_aliases,
+                                }
+                                reference_stats = legacy_wikidata_rows(ref_conn, wikidata_compare_rows, **flags)
+                                batch_stats = process_wikidata_lexemes(
+                                    wikidata_compare_source, batch_conn, **flags,
+                                )
+                                assert batch_stats == reference_stats, flags
+                                assert batch_conn.execute(
+                                    "SELECT lemma, definition, source FROM senses ORDER BY lemma, definition, source"
+                                ).fetchall() == ref_conn.execute(
+                                    "SELECT lemma, definition, source FROM senses ORDER BY lemma, definition, source"
+                                ).fetchall(), flags
+                                assert batch_conn.execute(
+                                    "SELECT key, lemma FROM links ORDER BY key, lemma"
+                                ).fetchall() == ref_conn.execute(
+                                    "SELECT key, lemma FROM links ORDER BY key, lemma"
+                                ).fetchall(), flags
+                            finally:
+                                ref_conn.close()
+                                batch_conn.close()
+    finally:
+        wikidata_compare_source.unlink(missing_ok=True)
+
     # Stress aliases must preserve Cyrillic breve: ``руко́й`` -> ``рукой``,
     # never the corrupt ``рукои``.
     assert "рукой" in _alias_candidates("руко́й", True, True, True)

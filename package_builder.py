@@ -48,6 +48,8 @@ EXCLUDED_FILES = {
     "reader_layers.py",
     "internal_book_coverage.py",
     "test_reader_layers.py",
+    "test_book_coverage.py",
+    "test_scan_book_coverage.py",
     "BOOK_COVERAGE_NEW.json",
     "BOOK_COVERAGE_WITH_LAYERS.json",
     "BUILD_STATS.json",
@@ -71,6 +73,7 @@ TEST_BOOK_FILES = {
 # that fails immediately after extraction.
 RELEASE_REQUIRED_FILES = {
     "dictionary_layout.py",
+    "reader_packs/german_literary.tsv",
 }
 ZIP_EPOCH = (1980, 1, 1, 0, 0, 0)
 

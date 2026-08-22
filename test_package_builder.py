@@ -18,10 +18,13 @@ def main() -> None:
         (root / "dictionary_layout.py").write_text("ROOT = 'RU-Dictionaries'\n", encoding="utf-8")
         (root / "reader_packs").mkdir()
         (root / "reader_packs" / "phraseology.tsv").write_text("a\tb\n", encoding="utf-8")
+        (root / "reader_packs" / "german_literary.tsv").write_text("Herr\tГосподин.\n", encoding="utf-8")
         (root / "scan_book_coverage.py").write_text("print('internal')\n", encoding="utf-8")
         (root / "reader_layers.py").write_text("print('internal scanner')\n", encoding="utf-8")
         (root / "internal_book_coverage.py").write_text("print('internal coverage')\n", encoding="utf-8")
         (root / "test_reader_layers.py").write_text("print('internal scanner tests')\n", encoding="utf-8")
+        (root / "test_book_coverage.py").write_text("print('internal coverage tests')\n", encoding="utf-8")
+        (root / "test_scan_book_coverage.py").write_text("print('internal scanner tests')\n", encoding="utf-8")
         (root / "BOOK_COVERAGE_NEW.json").write_text("{}\n", encoding="utf-8")
         (root / "BOOK_COVERAGE_ITERATION.json").write_text("{}\n", encoding="utf-8")
         (root / "BOOK_COVERAGE_ITERATION_FULL.json").write_text("{}\n", encoding="utf-8")
@@ -43,7 +46,7 @@ def main() -> None:
         second = root / "dist" / "builder-again.zip"
         result = build_package(root, first, "1.0")
         build_package(root, second, "1.0")
-        assert result["file_count"] == 7
+        assert result["file_count"] == 8
         assert hashlib.sha256(first.read_bytes()).digest() == hashlib.sha256(second.read_bytes()).digest()
 
         with zipfile.ZipFile(first) as archive:
@@ -52,6 +55,7 @@ def main() -> None:
             assert "build_ru_max_clean.py" in names
             assert "dictionary_layout.py" in names
             assert "reader_packs/phraseology.tsv" in names
+            assert "reader_packs/german_literary.tsv" in names
             assert "test_books/RU-Max-Clean-Dictionary-Test-Book.epub" in names
             assert "test_books/RU-Max-Clean-Dictionary-Test-Book.fb2" in names
             assert "test_books/README_RU.txt" in names
@@ -60,6 +64,8 @@ def main() -> None:
             assert "reader_layers.py" not in names
             assert "internal_book_coverage.py" not in names
             assert "test_reader_layers.py" not in names
+            assert "test_book_coverage.py" not in names
+            assert "test_scan_book_coverage.py" not in names
             assert "BOOK_COVERAGE_NEW.json" not in names
             assert "BOOK_COVERAGE_ITERATION.json" not in names
             assert "BOOK_COVERAGE_ITERATION_FULL.json" not in names

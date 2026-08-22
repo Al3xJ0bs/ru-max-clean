@@ -49,6 +49,7 @@ READER_PACKS: tuple[tuple[str, str], ...] = (
     ("literary_archaic.tsv", "Архаика и церковнославянская лексика"),
     ("literary_wiktionary.tsv", "Расширенная историческая лексика"),
     ("french_literary.tsv", "Французская лексика в русской прозе"),
+    ("german_literary.tsv", "Немецкая лексика в литературе"),
     ("literary_names.tsv", "Литературные имена и названия"),
     ("fantasy_terms.tsv", "Фэнтезийные термины"),
     ("literary_terms.tsv", "Историко-культурные термины"),
